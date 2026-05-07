@@ -86,11 +86,86 @@ export const useChatMessages = () => {
 				});
 			});
 
+			// Streaming bubble grown in-place from SSE 'chunk' events (#752).
+			let streamingId: number | null = null;
+			const lastSeq = new Map<string, number>();
+			const lastReasoningSeq = new Map<string, number>();
+
+			// Drop out-of-order/duplicate deltas defensively (engine guarantees order today).
+			const acceptSeq = (m: Map<string, number>, data: Record<string, unknown>): boolean => {
+				const seq = typeof data.seq === 'number' ? data.seq : undefined;
+				if (seq === undefined) return true;
+				const key = `${String(data.runId ?? '')}:${String(data.nodeId ?? '')}`;
+				const prev = m.get(key);
+				if (prev !== undefined && seq <= prev) return false;
+				m.set(key, seq);
+				return true;
+			};
+
+			const ensureBubble = (initial: Partial<Message> = {}): number => {
+				if (streamingId !== null) return streamingId;
+				streamingId = Date.now();
+				const id = streamingId;
+				setMessages(prev => [...prev, {
+					id,
+					text: '',
+					sender: 'bot',
+					timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+					...initial,
+				}]);
+				return id;
+			};
+
 			// Send to RocketRide; onSSE adds real-time status messages to the chat
 			const result: PIPELINE_RESULT = await client.chat({
 				token: authToken,
 				question: question,
 				onSSE: async (type: string, data: Record<string, unknown>) => {
+					if (type === 'chunk') {
+						const delta = data.text as string | undefined;
+						if (!delta || !acceptSeq(lastSeq, data)) return;
+						const id = ensureBubble({ text: delta });
+						setMessages(prev => prev.map(m => {
+							if (m.id !== id) return m;
+							// Skip duplicate when ensureBubble just seeded text=delta.
+							if (m.text === delta && m.reasoning === undefined) return m;
+							return { ...m, text: m.text + delta };
+						}));
+						return;
+					}
+					if (type === 'reasoning_chunk') {
+						const delta = data.text as string | undefined;
+						if (!delta || !acceptSeq(lastReasoningSeq, data)) return;
+						const id = ensureBubble({ reasoning: '', reasoningStreaming: true });
+						setMessages(prev => prev.map(m =>
+							m.id === id
+								? { ...m, reasoning: (m.reasoning ?? '') + delta, reasoningStreaming: true }
+								: m
+						));
+						return;
+					}
+					if (type === 'reasoning_end') {
+						if (streamingId !== null) {
+							const id = streamingId;
+							setMessages(prev => prev.map(m =>
+								m.id === id ? { ...m, reasoningStreaming: false } : m
+							));
+						}
+						return;
+					}
+					if (type === 'chunk_end') {
+						const reason = data.finishReason as string | null | undefined;
+						if (reason && reason !== 'stop' && streamingId !== null) {
+							const id = streamingId;
+							const note = reason === 'length'
+								? '\n\n_[response truncated by max_tokens]_'
+								: `\n\n_[stream ended: ${reason}]_`;
+							setMessages(prev => prev.map(m =>
+								m.id === id ? { ...m, text: m.text + note } : m
+							));
+						}
+						return;
+					}
 					const text = data.message as string | undefined;
 					if (text) {
 						setMessages(prev => [...prev, {
@@ -103,6 +178,9 @@ export const useChatMessages = () => {
 					}
 				}
 			});
+
+			// Streaming already painted the answer in-place — skip the duplicate append.
+			if (streamingId !== null) return [];
 
 			// Extract text responses from result
 			const textResponses = extractTextFromResult(result);

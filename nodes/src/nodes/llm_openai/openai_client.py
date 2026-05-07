@@ -29,13 +29,20 @@ from typing import Any, Dict
 from ai.common.chat import ChatBase
 from ai.common.config import Config
 from langchain_openai import ChatOpenAI
-from openai import APIError, AuthenticationError, RateLimitError, APIConnectionError
+from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError
 
 
 class Chat(ChatBase):
     """
     Create an OpenAI chat bot.
     """
+
+    # Reasoning-capable models. For these we bypass langchain (Chat Completions)
+    # and go through the OpenAI Responses API (driven by ChatBase) so we can
+    # stream the reasoning summary as well as the answer. Keep in sync with
+    # IGlobal.beginGlobal.
+    SUPPORTS_REASONING_STREAMING = True
+    _REASONING_PREFIXES = ('o1', 'o3', 'o4', 'gpt-5')
 
     _llm: ChatOpenAI
 
@@ -51,9 +58,28 @@ class Chat(ChatBase):
 
         # Get the api key, don't save it
         apikey = config.get('apikey')
+        self._apikey = apikey
+        self._is_reasoning = self._matches_reasoning_prefix(self._model, self._REASONING_PREFIXES)
 
-        # Get the llm
-        self._llm = ChatOpenAI(model=self._model, api_key=apikey, temperature=0, max_tokens=self._modelOutputTokens)
+        # OpenAI deprecated `max_tokens` for reasoning models (o1/o3/o4) and the
+        # gpt-5 family — they require `max_completion_tokens` instead and reject
+        # `max_tokens` with a 400. Same models also refuse `temperature != 1`.
+        if self._is_reasoning:
+            # Raw client for the Responses API path (reasoning models).
+            self._raw_client = OpenAI(api_key=apikey)
+            self._llm = ChatOpenAI(
+                model=self._model,
+                api_key=apikey,
+                model_kwargs={'max_completion_tokens': self._modelOutputTokens},
+            )
+        else:
+            self._raw_client = None
+            self._llm = ChatOpenAI(
+                model=self._model,
+                api_key=apikey,
+                temperature=0,
+                max_tokens=self._modelOutputTokens,
+            )
 
         # Save our chat class into the bag
         bag['chat'] = self
