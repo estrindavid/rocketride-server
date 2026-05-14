@@ -57,6 +57,7 @@ class TaskScheduler:
         self._registry: Dict[str, Tuple[datetime, DeploymentRecord]] = {}
         # deployment_id -> token of the most-recently dispatched task (overlap guard)
         self._active_tokens: Dict[str, str] = {}
+        self._loop_task: asyncio.Task | None = None
 
     def schedule(self, record: DeploymentRecord) -> None:
         """Insert or update a deployment. Removes it when manual or not active."""
@@ -75,7 +76,17 @@ class TaskScheduler:
     async def start(self) -> None:
         """Load all persisted deployments then start the scheduler loop."""
         await self._load_all()
-        asyncio.create_task(self._loop())
+        self._loop_task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        """Cancel the scheduler loop and wait for it to finish."""
+        if self._loop_task and not self._loop_task.done():
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+        self._loop_task = None
 
     async def _load_all(self) -> None:
         """Populate the registry from all persisted deployments across all users."""
