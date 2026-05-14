@@ -112,6 +112,7 @@ class DeployCommands(DAPConn):
             updated_at=time.time(),
         )
         await self._deployment_store().save(record)
+        self._server.scheduler.schedule(record)
         return self.build_response(request, body=record.model_dump())
 
     # ── rrext_deploy_remove ──────────────────────────────────────────────────
@@ -126,6 +127,7 @@ class DeployCommands(DAPConn):
             raise ValueError('deploymentId is required')
 
         await self._deployment_store().delete(deployment_id)
+        self._server.scheduler.unschedule(deployment_id)
         return self.build_response(request, body={})
 
     # ── rrext_deploy_list ────────────────────────────────────────────────────
@@ -178,4 +180,5 @@ class DeployCommands(DAPConn):
 
         record.updated_at = time.time()
         await ds.save(record)
+        self._server.scheduler.schedule(record)
         return self.build_response(request, body={})
