@@ -412,6 +412,7 @@ class ChatBase:
         on_chunk: Optional[Callable[[str], None]] = None,
         on_finish: Optional[Callable[[Optional[str]], None]] = None,
         on_reasoning_chunk: Optional[Callable[[str], None]] = None,
+        emitted: Optional[Dict[str, bool]] = None,
     ) -> str:
         """Streaming path for the OpenAI Responses API.
 
@@ -419,7 +420,8 @@ class ChatBase:
         ``response.reasoning_summary_text.delta`` alongside the usual
         ``response.output_text.delta`` events. Requires ``self._raw_client``
         to expose ``.responses.create(...)``. Falls back to non-streaming
-        ``invoke()`` on any provider error.
+        ``invoke()`` only when no chunk has reached the UI yet (otherwise the
+        partial would be duplicated by the fallback's full text).
         """
         prompt = validate_prompt(prompt, self._modelTotalTokens, self.getTokens)
 
@@ -464,15 +466,16 @@ class ChatBase:
                 elif etype in ('response.failed', 'response.error'):
                     finish_reason = 'error'
         except Exception as e:
-            # Falls back to non-streaming invoke() so the user still gets an answer.
-            warning(
-                f'Reasoning streaming disabled for model={self._model} '
-                f'({type(e).__name__}): {e}. Falling back to non-streaming response.'
-            )
-            results = self._llm.invoke(prompt)
-            content = getattr(results, 'content', '') or ''
-            text_parts = [content if isinstance(content, str) else str(content)]
-            finish_reason = 'stop'
+            warning(f'Reasoning streaming disabled for model={self._model} ({type(e).__name__}): {e}.')
+            # Only retry non-streaming if nothing has reached the UI; otherwise
+            # the full fallback would arrive on top of the partial we already streamed.
+            if emitted is None or not emitted['any']:
+                results = self._llm.invoke(prompt)
+                content = getattr(results, 'content', '') or ''
+                text_parts = [content if isinstance(content, str) else str(content)]
+                finish_reason = 'stop'
+            else:
+                finish_reason = 'error'
 
         if on_finish is not None:
             on_finish(finish_reason)
@@ -530,6 +533,24 @@ class ChatBase:
                 f'Warning: Prompt ({prompt_tokens} tokens) exceeds input allocation ({self._modelTotalTokens} tokens)'
             )
 
+        # Wrap streaming callbacks so we can tell whether any chunk has reached
+        # the UI. Once `emitted['any']` is True, every fallback path must skip
+        # the non-streaming retry to avoid duplicating content on the wire.
+        emitted = {'any': False}
+
+        def _wrap(cb):
+            if cb is None:
+                return None
+
+            def _inner(t):
+                emitted['any'] = True
+                cb(t)
+
+            return _inner
+
+        on_chunk_w = _wrap(on_chunk)
+        on_reasoning_chunk_w = _wrap(on_reasoning_chunk)
+
         # Responses API path for opt-in reasoning models (OpenAI o-series / gpt-5).
         if (
             self.SUPPORTS_REASONING_STREAMING
@@ -539,35 +560,42 @@ class ChatBase:
         ):
             return self._chat_string_responses(
                 prompt,
-                on_chunk=on_chunk,
+                on_chunk=on_chunk_w,
                 on_finish=on_finish,
-                on_reasoning_chunk=on_reasoning_chunk,
+                on_reasoning_chunk=on_reasoning_chunk_w,
+                emitted=emitted,
             )
 
         # Provider-native streaming (Anthropic extended thinking, Mistral magistral).
         if on_chunk is not None:
-            native_text = dispatch_native_chat_stream(self, prompt, on_chunk, on_finish, on_reasoning_chunk)
+            native_text = dispatch_native_chat_stream(self, prompt, on_chunk_w, on_finish, on_reasoning_chunk_w)
             if native_text is not None:
                 result_tokens = self.getTokens(native_text)
                 if prompt_tokens + result_tokens >= self._modelTotalTokens - 5:
                     debug(f'Warning: Result ({result_tokens} tokens) was probably truncated')
                 return native_text
+            # Native handler returned None after emitting chunks: don't restart
+            # the request through a different path, just close with an error.
+            if emitted['any']:
+                if on_finish is not None:
+                    on_finish('error')
+                return ''
 
         _llm = getattr(self, '_llm', None)
 
         # Prime the Thinking… panel when the model reasons silently before its first delta
         # (Anthropic Sonnet 4.x sometimes only emits a signature_delta).
-        if on_reasoning_chunk is not None:
+        if on_reasoning_chunk_w is not None:
             if _llm is not None and getattr(_llm, 'thinking', None):
-                on_reasoning_chunk('_Thinking…_\n\n')
+                on_reasoning_chunk_w('_Thinking…_\n\n')
             elif self._matches_reasoning_prefix(self._model, _REASONING_STREAM_PRIME_PREFIXES):
-                on_reasoning_chunk('_Thinking…_\n\n')
+                on_reasoning_chunk_w('_Thinking…_\n\n')
 
         # Call the chat implementation with network retry logic
         # This is where the real communication with the AI provider happens
         # Use chat_string when a per-token callback is provided; .stream() if available, else fall back.
         result = None
-        if on_chunk is not None and _llm is not None and hasattr(_llm, 'stream'):
+        if on_chunk_w is not None and _llm is not None and hasattr(_llm, 'stream'):
             try:
                 parts = []
                 finish_reason: Optional[str] = None
@@ -589,7 +617,7 @@ class ChatBase:
                                 if piece_text:
                                     thinking_delta += piece_text
                                 elif b.get('signature') and not _signature_only_note_sent:
-                                    if on_reasoning_chunk is not None:
+                                    if on_reasoning_chunk_w is not None:
                                         thinking_delta += (
                                             '_Extended thinking ran, but this stream only delivered the '
                                             'block verification signature, not the readable chain-of-thought '
@@ -608,10 +636,10 @@ class ChatBase:
                         text, _thinking_inline = _think_split(content)
                         if _thinking_inline:
                             thinking_delta += _thinking_inline
-                    if thinking_delta and on_reasoning_chunk is not None:
-                        on_reasoning_chunk(thinking_delta)
+                    if thinking_delta and on_reasoning_chunk_w is not None:
+                        on_reasoning_chunk_w(thinking_delta)
                     if text:
-                        on_chunk(text)
+                        on_chunk_w(text)
                         parts.append(text)
                     reason = (piece.response_metadata or {}).get('finish_reason')
                     if reason:
@@ -619,10 +647,10 @@ class ChatBase:
                 # Drain chars buffered by the <think> splitter (partial-tag tail).
                 tail_visible, tail_reasoning = _think_split.flush()
                 if tail_visible:
-                    on_chunk(tail_visible)
+                    on_chunk_w(tail_visible)
                     parts.append(tail_visible)
-                if tail_reasoning and on_reasoning_chunk is not None:
-                    on_reasoning_chunk(tail_reasoning)
+                if tail_reasoning and on_reasoning_chunk_w is not None:
+                    on_reasoning_chunk_w(tail_reasoning)
                 if parts:
                     result = ''.join(parts)
                     if on_finish is not None:
@@ -633,7 +661,14 @@ class ChatBase:
                     f'({type(e).__name__}): {e}. Falling back to non-streaming response.'
                 )
         if result is None:
-            result = self._chat_with_retries(prompt)
+            # If anything already reached the UI we can't restart the request
+            # (would duplicate content); close with an error and return partials.
+            if emitted['any']:
+                if on_finish is not None:
+                    on_finish('error')
+                result = ''
+            else:
+                result = self._chat_with_retries(prompt)
 
         # Count tokens in the response to check for potential truncation
         # This helps identify cases where the model's response was cut off
@@ -679,13 +714,17 @@ class ChatBase:
             Exception: If network/API retries are exhausted or non-retryable
                       errors occur
         """
+        # Streaming is incompatible with JSON-repair retries: a malformed first
+        # attempt would already be painted on the UI before we retry. Disable
+        # callbacks for expectJson so the UI only sees the validated final answer.
+        stream_cbs = (None, None, None) if question.expectJson else (on_chunk, on_finish, on_reasoning_chunk)
+
         # Use chat_string which already handles network retries and token management
-        # Streaming callbacks fire only on the initial call; JSON retries are non-streaming.
         response = self.chat_string(
             question.getPrompt(),
-            on_chunk=on_chunk,
-            on_finish=on_finish,
-            on_reasoning_chunk=on_reasoning_chunk,
+            on_chunk=stream_cbs[0],
+            on_finish=stream_cbs[1],
+            on_reasoning_chunk=stream_cbs[2],
         )
 
         # If JSON output is expected, validate the response and retry if needed.

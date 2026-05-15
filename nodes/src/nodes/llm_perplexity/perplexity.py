@@ -230,7 +230,8 @@ class Chat(ChatBase):
                 answer = Answer(expectJson=question.expectJson)
                 answer.setAnswer(visible)
                 if on_finish is not None:
-                    on_finish('stop')
+                    meta = getattr(results, 'response_metadata', None) or {}
+                    on_finish(meta.get('finish_reason') or 'stop')
                 return answer
 
             except Exception as e:

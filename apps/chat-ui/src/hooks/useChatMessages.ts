@@ -102,8 +102,8 @@ export const useChatMessages = () => {
 				return true;
 			};
 
-			const ensureBubble = (initial: Partial<Message> = {}): number => {
-				if (streamingId !== null) return streamingId;
+			const ensureBubble = (initial: Partial<Message> = {}): { id: number; created: boolean } => {
+				if (streamingId !== null) return { id: streamingId, created: false };
 				streamingId = Date.now();
 				const id = streamingId;
 				setMessages(prev => [...prev, {
@@ -113,7 +113,7 @@ export const useChatMessages = () => {
 					timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
 					...initial,
 				}]);
-				return id;
+				return { id, created: true };
 			};
 
 			// Send to RocketRide; onSSE adds real-time status messages to the chat
@@ -124,19 +124,18 @@ export const useChatMessages = () => {
 					if (type === 'chunk') {
 						const delta = data.text as string | undefined;
 						if (!delta || !acceptSeq(lastSeq, data)) return;
-						const id = ensureBubble({ text: delta });
-						setMessages(prev => prev.map(m => {
-							if (m.id !== id) return m;
-							// Skip duplicate when ensureBubble just seeded text=delta.
-							if (m.text === delta && m.reasoning === undefined) return m;
-							return { ...m, text: m.text + delta };
-						}));
+						const { id, created } = ensureBubble({ text: delta });
+						if (created) return;  // bubble was just seeded with this delta
+						setMessages(prev => prev.map(m =>
+							m.id === id ? { ...m, text: m.text + delta } : m
+						));
 						return;
 					}
 					if (type === 'reasoning_chunk') {
 						const delta = data.text as string | undefined;
 						if (!delta || !acceptSeq(lastReasoningSeq, data)) return;
-						const id = ensureBubble({ reasoning: '', reasoningStreaming: true });
+						const { id, created } = ensureBubble({ reasoning: delta, reasoningStreaming: true });
+						if (created) return;  // bubble was just seeded with this reasoning delta
 						setMessages(prev => prev.map(m =>
 							m.id === id
 								? { ...m, reasoning: (m.reasoning ?? '') + delta, reasoningStreaming: true }

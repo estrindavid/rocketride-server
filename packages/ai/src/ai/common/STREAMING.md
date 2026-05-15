@@ -118,7 +118,7 @@ The `<think>` splitter is a stateful closure in `chat.py` (`_make_think_tag_spli
 
 ## Adding a new provider
 
-1. If the provider streams via OpenAI-compatible Chat Completions and emits `reasoning_content` on deltas → **no change needed**, the generic loop picks it up.
+1. If the provider streams via OpenAI-compatible Chat Completions and emits `reasoning_content` on deltas → opt into the `openai_compat_reasoning` native handler (raw `openai` SDK + `self._native_stream_provider = 'openai_compat_reasoning'`); `langchain-openai` strips the field.
 2. If it uses `<think>` tags inline → **no change needed**, the splitter handles it.
 3. If it needs the **Responses API**: set `SUPPORTS_REASONING_STREAMING = True`, declare `_REASONING_PREFIXES`, and assign `self._raw_client` to an `OpenAI()`-compatible client in `__init__`.
 4. If it needs a **custom SDK** (Anthropic/Mistral-style): write a handler in `llm_native_stream.py`, register it, and set `self._native_stream_provider = '<key>'` in the driver's `__init__`.

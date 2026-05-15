@@ -216,7 +216,9 @@ class Chat(ChatBase):
 
     def map_exception(self, error: Exception) -> Exception:
         """Map Mistral SDK errors to clearer operator-facing messages."""
-        return Exception(self._format_user_error(str(error)))
+        mapped = ValueError(self._format_user_error(str(error)))
+        mapped.__cause__ = error
+        return mapped
 
     def _chat(self, prompt: str) -> str:
         """Non-streaming completion; retries are handled by :meth:`ChatBase._chat_with_retries`."""

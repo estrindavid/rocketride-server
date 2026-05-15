@@ -249,7 +249,7 @@ class Chat(ChatBase):
                 answer = Answer(expectJson=question.expectJson)
                 answer.setAnswer(chat_response.choices[0].message.content)
                 if on_finish is not None:
-                    on_finish('stop')
+                    on_finish(getattr(chat_response.choices[0], 'finish_reason', None) or 'stop')
                 return answer
             except Exception as e:
                 last_error = e

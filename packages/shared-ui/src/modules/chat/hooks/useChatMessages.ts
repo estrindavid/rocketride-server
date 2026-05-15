@@ -113,15 +113,15 @@ export function useChatMessages({ welcomeMessage }: UseChatMessagesOptions = {})
 				return true;
 			};
 
-			const ensureBubble = (initial: Partial<ChatMessage> = {}): number => {
-				if (streamingId !== null) return streamingId;
+			const ensureBubble = (initial: Partial<ChatMessage> = {}): { id: number; created: boolean } => {
+				if (streamingId !== null) return { id: streamingId, created: false };
 				streamingId = nextId();
 				const id = streamingId;
 				updateMessages((prev) => [
 					...prev,
 					{ id, text: '', sender: 'bot', timestamp: ts(), ...initial },
 				]);
-				return id;
+				return { id, created: true };
 			};
 
 			const result: PIPELINE_RESULT = await client.chat({
@@ -131,20 +131,18 @@ export function useChatMessages({ welcomeMessage }: UseChatMessagesOptions = {})
 					if (type === 'chunk') {
 						const delta = data.text as string | undefined;
 						if (!delta || !acceptSeq(lastSeq, data)) return;
-						const id = ensureBubble({ text: delta });
+						const { id, created } = ensureBubble({ text: delta });
+						if (created) return;  // bubble was just seeded with this delta
 						updateMessages((prev) =>
-							prev.map((m) => {
-								if (m.id !== id) return m;
-								if (m.text === delta && m.reasoning === undefined) return m;
-								return { ...m, text: m.text + delta };
-							})
+							prev.map((m) => (m.id === id ? { ...m, text: m.text + delta } : m))
 						);
 						return;
 					}
 					if (type === 'reasoning_chunk') {
 						const delta = data.text as string | undefined;
 						if (!delta || !acceptSeq(lastReasoningSeq, data)) return;
-						const id = ensureBubble({ reasoning: '', reasoningStreaming: true });
+						const { id, created } = ensureBubble({ reasoning: delta, reasoningStreaming: true });
+						if (created) return;  // bubble was just seeded with this reasoning delta
 						updateMessages((prev) =>
 							prev.map((m) =>
 								m.id === id
