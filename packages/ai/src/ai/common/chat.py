@@ -533,23 +533,21 @@ class ChatBase:
                 f'Warning: Prompt ({prompt_tokens} tokens) exceeds input allocation ({self._modelTotalTokens} tokens)'
             )
 
-        # Wrap streaming callbacks so we can tell whether any chunk has reached
-        # the UI. Once `emitted['any']` is True, every fallback path must skip
-        # the non-streaming retry to avoid duplicating content on the wire.
+        # Track whether any visible-text chunk has reached the UI. Once True,
+        # fallback paths must skip the non-streaming retry to avoid duplicating
+        # visible content. Reasoning-only emission (incl. the "Thinking…" prime)
+        # intentionally does NOT lock the gate — only `on_chunk` flips it.
         emitted = {'any': False}
 
-        def _wrap(cb):
-            if cb is None:
-                return None
+        if on_chunk is None:
+            on_chunk_w = None
+        else:
 
-            def _inner(t):
+            def on_chunk_w(t):
                 emitted['any'] = True
-                cb(t)
+                on_chunk(t)
 
-            return _inner
-
-        on_chunk_w = _wrap(on_chunk)
-        on_reasoning_chunk_w = _wrap(on_reasoning_chunk)
+        on_reasoning_chunk_w = on_reasoning_chunk
 
         # Responses API path for opt-in reasoning models (OpenAI o-series / gpt-5).
         if (
