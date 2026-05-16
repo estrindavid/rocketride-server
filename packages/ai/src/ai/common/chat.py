@@ -81,10 +81,6 @@ def _make_think_tag_splitter():
     return feed
 
 
-# Providers that stream CoT in `reasoning_content` and want the panel primed early.
-_REASONING_STREAM_PRIME_PREFIXES = ('deepseek-reasoner',)
-
-
 class ChatBase:
     """
     Abstract base class for all chat drivers with configurable token allocation.
@@ -109,12 +105,6 @@ class ChatBase:
     SUPPORTS_REASONING_STREAMING: bool = False
     _is_reasoning: bool = False
     _raw_client = None
-
-    @staticmethod
-    def _matches_reasoning_prefix(model: str, prefixes: tuple) -> bool:
-        """Return True if `model` equals or starts with one of `prefixes` (`-` or `.`-separated)."""
-        m = (model or '').lower()
-        return any(m == p or m.startswith(f'{p}-') or m.startswith(f'{p}.') for p in prefixes)
 
     def __init__(self, provider: str, connConfig: Dict[str, Any], bag: Dict[str, Any]):
         """
@@ -581,13 +571,9 @@ class ChatBase:
 
         _llm = getattr(self, '_llm', None)
 
-        # Prime the Thinking… panel when the model reasons silently before its first delta
-        # (Anthropic Sonnet 4.x sometimes only emits a signature_delta).
-        if on_reasoning_chunk_w is not None:
-            if _llm is not None and getattr(_llm, 'thinking', None):
-                on_reasoning_chunk_w('_Thinking…_\n\n')
-            elif self._matches_reasoning_prefix(self._model, _REASONING_STREAM_PRIME_PREFIXES):
-                on_reasoning_chunk_w('_Thinking…_\n\n')
+        # Prime the Thinking… panel for reasoning profiles (they often pause before any delta).
+        if on_reasoning_chunk_w is not None and getattr(self, '_is_reasoning', False):
+            on_reasoning_chunk_w('_Thinking…_\n\n')
 
         # Call the chat implementation with network retry logic
         # This is where the real communication with the AI provider happens

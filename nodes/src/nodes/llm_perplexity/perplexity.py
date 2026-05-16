@@ -84,6 +84,8 @@ class Chat(ChatBase):
             max_tokens=self._modelOutputTokens,
         )
 
+        self._is_reasoning = bool((config.get('capabilities') or {}).get('reasoning'))
+
         # Store in bag for pipeline access
         bag['chat'] = self
 
@@ -220,15 +222,17 @@ class Chat(ChatBase):
                 results = self._llm.invoke(prompt)
                 content = results.content or ''
 
-                # Split off any <think>...</think> blocks and emit them as reasoning.
-                reasoning_parts: list = []
-                visible = _THINK_RE.sub(lambda m: reasoning_parts.append(m.group(1)) or '', content)
-                if reasoning_parts and on_reasoning_chunk is not None:
-                    on_reasoning_chunk('\n'.join(p.strip() for p in reasoning_parts if p.strip()))
+                # Reasoning Sonar models embed CoT in <think>...</think>; only
+                # parse when the profile is flagged reasoning-capable.
+                if self._is_reasoning:
+                    reasoning_parts: list = []
+                    content = _THINK_RE.sub(lambda m: reasoning_parts.append(m.group(1)) or '', content)
+                    if reasoning_parts and on_reasoning_chunk is not None:
+                        on_reasoning_chunk('\n'.join(p.strip() for p in reasoning_parts if p.strip()))
 
                 # Create and return the answer
                 answer = Answer(expectJson=question.expectJson)
-                answer.setAnswer(visible)
+                answer.setAnswer(content)
                 if on_finish is not None:
                     meta = getattr(results, 'response_metadata', None) or {}
                     on_finish(meta.get('finish_reason') or 'stop')
