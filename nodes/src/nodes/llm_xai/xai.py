@@ -38,18 +38,6 @@ from openai import OpenAI
 
 XAI_BASE_URL = 'https://api.x.ai/v1'
 
-# Grok variants that emit reasoning_content deltas. Non-reasoning variants
-# reject `reasoning_effort` with 400, so we only pass it for these.
-_REASONING_MODEL_KEYWORDS = ('grok-4', 'grok-3-mini')
-_NON_REASONING_SUFFIXES = ('-non-reasoning', '-fast-non-reasoning')
-
-
-def _is_reasoning_model(model: str) -> bool:
-    m = (model or '').lower()
-    if any(m.endswith(s) for s in _NON_REASONING_SUFFIXES):
-        return False
-    return any(k in m for k in _REASONING_MODEL_KEYWORDS)
-
 
 class Chat(ChatBase):
     """
@@ -83,17 +71,12 @@ class Chat(ChatBase):
             'temperature': 0,
             'max_tokens': self._modelOutputTokens,
         }
-        is_reasoning = _is_reasoning_model(self._model)
+        is_reasoning = bool((config.get('capabilities') or {}).get('reasoning'))
         if is_reasoning:
-            # `reasoning_effort` is accepted by Chat Completions on reasoning
-            # Grok models; "low" matches xAI's documented default and keeps
-            # cost predictable for the chat UI.
             kwargs['model_kwargs'] = {'reasoning_effort': 'low'}
 
         self._llm = ChatOpenAI(**kwargs)
 
-        # Reasoning path: bypass langchain-openai (it strips `reasoning_content`)
-        # by streaming through the raw openai SDK.
         if is_reasoning:
             self._raw_openai_client = OpenAI(api_key=apikey, base_url=XAI_BASE_URL)
             self._reasoning_kwargs = {'reasoning_effort': 'low'}

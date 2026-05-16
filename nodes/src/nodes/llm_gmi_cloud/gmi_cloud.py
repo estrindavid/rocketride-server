@@ -29,15 +29,6 @@ from ai.common.chat import ChatBase
 from ai.common.config import Config
 from langchain_openai import ChatOpenAI
 
-# GMI Cloud serves third-party models on its OpenAI-compatible endpoint.
-# These families emit `reasoning_content` on stream deltas.
-_REASONING_KEYWORDS = ('deepseek-r1', 'deepseek-prover', 'qwen3')
-
-
-def _is_reasoning_model(model: str) -> bool:
-    m = (model or '').lower()
-    return any(k in m for k in _REASONING_KEYWORDS)
-
 
 class Chat(ChatBase):
     """Creates a GMI Cloud chat bot."""
@@ -72,9 +63,7 @@ class Chat(ChatBase):
             max_tokens=self._modelOutputTokens,
         )
 
-        # Reasoning path: bypass langchain-openai (it strips `reasoning_content`)
-        # by streaming through the raw openai SDK.
-        if _is_reasoning_model(self._model):
+        if (config.get('capabilities') or {}).get('reasoning'):
             self._raw_openai_client = OpenAI(api_key=apikey, base_url=serverbase)
             self._native_stream_provider = 'openai_compat_reasoning'
 

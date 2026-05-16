@@ -31,14 +31,6 @@ from ai.common.config import Config
 from langchain_openai import ChatOpenAI
 from openai import OpenAI
 
-# Ollama thinking-capable model families per https://ollama.com/blog/thinking.
-_THINKING_KEYWORDS = ('deepseek-r1', 'qwen3', 'qwq')
-
-
-def _is_thinking_model(model: str) -> bool:
-    m = (model or '').lower()
-    return any(k in m for k in _THINKING_KEYWORDS)
-
 
 class Chat(ChatBase):
     """
@@ -71,10 +63,7 @@ class Chat(ChatBase):
             model=self._model, base_url=serverbase, api_key=apikey, temperature=0, max_tokens=self._modelOutputTokens
         )
 
-        # Thinking models: stream via raw openai SDK with `reasoning_effort` so
-        # the server emits `reasoning_content` (Ollama OpenAI-compat supports
-        # this; langchain-openai would drop the field).
-        if _is_thinking_model(self._model):
+        if (config.get('capabilities') or {}).get('reasoning'):
             self._raw_openai_client = OpenAI(api_key=apikey, base_url=serverbase)
             self._reasoning_kwargs = {'reasoning_effort': 'high'}
             self._native_stream_provider = 'openai_compat_reasoning'

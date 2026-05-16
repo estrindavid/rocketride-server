@@ -32,11 +32,6 @@ from langchain_openai import ChatOpenAI
 from openai import OpenAI
 
 
-def _is_reasoning_model(model: str) -> bool:
-    m = (model or '').lower()
-    return m.startswith('deepseek-reasoner') or 'r1' in m or m.startswith('deepseek-prover')
-
-
 class Chat(ChatBase):
     """
     Creates an Deepseek chat bot.
@@ -70,9 +65,9 @@ class Chat(ChatBase):
         if 'api.deepseek' in serverbase and not apikey.startswith('sk-'):
             raise ValueError('Invalid DeepSeek API key format, please check your API key.')
 
-        # Get the llm — deepseek-reasoner / r1 stream CoT in `reasoning_content`;
-        # omit `temperature` for that family per DeepSeek API notes.
-        is_reasoner = _is_reasoning_model(self._model)
+        # DeepSeek reasoning models reject `temperature`; route through raw SDK
+        # so `reasoning_content` survives (langchain-openai drops it).
+        is_reasoner = bool((config.get('capabilities') or {}).get('reasoning'))
         kwargs: Dict[str, Any] = {
             'model': self._model,
             'base_url': serverbase,
@@ -83,8 +78,6 @@ class Chat(ChatBase):
             kwargs['temperature'] = 0
         self._llm = ChatOpenAI(**kwargs)
 
-        # Reasoning path: bypass langchain-openai (it strips `reasoning_content`)
-        # by streaming through the raw openai SDK.
         if is_reasoner:
             self._raw_openai_client = OpenAI(api_key=apikey, base_url=serverbase)
             self._native_stream_provider = 'openai_compat_reasoning'

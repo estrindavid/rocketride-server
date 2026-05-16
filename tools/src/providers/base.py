@@ -499,7 +499,7 @@ class CloudProvider(ABC):
         """
         seen: Dict[str, Dict[str, Any]] = {}  # native_id → entry
 
-        for bare_id, (ctx, _out, _name, _exp) in get_openrouter_cache().items():
+        for bare_id, (ctx, _out, _name, _exp, _reasoning) in get_openrouter_cache().items():
             # Apply the same two-step conversion as _fetch_litellm_models():
             # 1. normalize_model_id() — handles raw ID quirks (e.g. dots→hyphens for Anthropic)
             # 2. litellm_to_native_model_id() — converts to the native format stored in

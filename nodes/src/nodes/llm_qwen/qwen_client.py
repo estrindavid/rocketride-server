@@ -37,27 +37,6 @@ DASHSCOPE_REGIONS = {
     'cn': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
 }
 
-# Qwen3+ hybrid-thinking model families that accept the `enable_thinking`
-# extra-body flag and emit `reasoning_content` on stream deltas. Default-off
-# variants (qwen-plus/-flash/-turbo, qwen3-max preview) need the flag to think;
-# Qwen3.5+ defaults to thinking-on but the flag is still accepted. Keep aligned
-# with https://help.aliyun.com/zh/model-studio/deep-thinking.
-_THINKING_CAPABLE_PREFIXES = (
-    'qwen-plus',
-    'qwen-flash',
-    'qwen-turbo',
-    'qwen-max',
-    'qwen3',
-    'qwen3.5',
-    'qwen3.6',
-    'qwq',  # always-thinking
-)
-
-
-def _supports_thinking(model: str) -> bool:
-    m = (model or '').lower()
-    return any(m == p or m.startswith(f'{p}-') or m.startswith(f'{p}.') for p in _THINKING_CAPABLE_PREFIXES)
-
 
 class Chat(ChatBase):
     """
@@ -94,13 +73,8 @@ class Chat(ChatBase):
             'temperature': 0,
             'max_tokens': self._modelOutputTokens,
         }
-        # Opt-in to chain-of-thought for hybrid-thinking models so the UI gets
-        # a "Thinking…" panel; without `enable_thinking` Qwen3 plus/flash/turbo
-        # default to non-thinking and reasoning_content stays empty.
-        if _supports_thinking(self._model):
+        if (config.get('capabilities') or {}).get('reasoning'):
             kwargs['model_kwargs'] = {'extra_body': {'enable_thinking': True}}
-            # Route streaming through the raw openai SDK so reasoning_content
-            # isn't dropped by langchain-openai. See llm_native_stream.py.
             self._raw_openai_client = OpenAI(api_key=apikey, base_url=base_url)
             self._reasoning_kwargs = {'extra_body': {'enable_thinking': True}}
             self._native_stream_provider = 'openai_compat_reasoning'
