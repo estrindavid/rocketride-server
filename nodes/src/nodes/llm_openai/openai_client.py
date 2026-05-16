@@ -37,12 +37,9 @@ class Chat(ChatBase):
     Create an OpenAI chat bot.
     """
 
-    # Reasoning-capable models. For these we bypass langchain (Chat Completions)
-    # and go through the OpenAI Responses API (driven by ChatBase) so we can
-    # stream the reasoning summary as well as the answer. Keep in sync with
-    # IGlobal.beginGlobal.
+    # Reasoning-capable models route through the OpenAI Responses API so we can
+    # stream the reasoning summary as well as the answer.
     SUPPORTS_REASONING_STREAMING = True
-    _REASONING_PREFIXES = ('o1', 'o3', 'o4', 'gpt-5')
 
     _llm: ChatOpenAI
 
@@ -59,7 +56,7 @@ class Chat(ChatBase):
         # Get the api key, don't save it
         apikey = config.get('apikey')
         self._apikey = apikey
-        self._is_reasoning = self._matches_reasoning_prefix(self._model, self._REASONING_PREFIXES)
+        self._is_reasoning = bool((config.get('capabilities') or {}).get('reasoning'))
 
         # OpenAI deprecated `max_tokens` for reasoning models (o1/o3/o4) and the
         # gpt-5 family — they require `max_completion_tokens` instead and reject

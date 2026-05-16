@@ -104,10 +104,10 @@ class ChatBase:
         _modelTotalTokens (int): Maximum tokens the model can handle in total
     """
 
-    # Opt-in: subclass sets True + populates _REASONING_PREFIXES and self._raw_client
+    # Opt-in: subclass sets True + sets self._is_reasoning and self._raw_client
     # to route through the OpenAI Responses API for reasoning-summary streaming.
     SUPPORTS_REASONING_STREAMING: bool = False
-    _REASONING_PREFIXES: tuple = ()
+    _is_reasoning: bool = False
     _raw_client = None
 
     @staticmethod
@@ -554,7 +554,7 @@ class ChatBase:
             self.SUPPORTS_REASONING_STREAMING
             and self._raw_client is not None
             and hasattr(self._raw_client, 'responses')
-            and self._matches_reasoning_prefix(self._model, self._REASONING_PREFIXES)
+            and self._is_reasoning
         ):
             return self._chat_string_responses(
                 prompt,

@@ -119,7 +119,8 @@ class Chat(ChatBase):
             'temperature': 0,
             'max_tokens': self._modelOutputTokens,
         }
-        kwargs.update(build_anthropic_thinking_kwargs(model_gate, self._modelOutputTokens))
+        is_reasoning = bool((config.get('capabilities') or {}).get('reasoning'))
+        kwargs.update(build_anthropic_thinking_kwargs(model_gate, self._modelOutputTokens, is_reasoning))
 
         self._extended_thinking = bool(kwargs.get('thinking'))
         self._native_stream_provider = 'anthropic'

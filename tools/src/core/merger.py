@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import re
 from typing import Dict, Any, List, NamedTuple, Tuple, Optional
 
 try:
@@ -84,14 +85,30 @@ def _load_openrouter_cache() -> None:
         _OPENROUTER_CACHE = {}  # empty sentinel — no retry on subsequent calls
 
 
-# Family roots whose distill/quantized variants (Ollama locals) inherit reasoning.
-_REASONING_FAMILIES = ('deepseek-r1', 'qwen3', 'qwq', 'magistral')
+# Stable family/product roots whose variants inherit reasoning (covers distills,
+# quantizations, Qwen hybrid-thinking DashScope aliases, and explicit `-thinking` snapshots).
+_REASONING_FAMILIES = (
+    'deepseek-r1',
+    'qwen3',
+    'qwq',
+    'magistral',
+    'qwen-plus',
+    'qwen-flash',
+    'qwen-turbo',
+    'qwen-max',
+    '-thinking',
+)
 
 
 def _is_reasoning_model(bare_id: str) -> bool:
     """True if the model is in OpenRouter as reasoning, or matches a known family root."""
     cache = get_openrouter_cache()
     entry = cache.get(bare_id)
+    if entry is None:
+        # Anthropic profiles store hyphens (claude-opus-4-7) while OR uses dots (claude-opus-4.7).
+        dotted = re.sub(r'(\d)-(\d)', r'\1.\2', bare_id)
+        if dotted != bare_id:
+            entry = cache.get(dotted)
     if entry is not None and entry[4]:
         return True
     low = bare_id.lower()

@@ -29,8 +29,6 @@ _VENDOR_MODEL_PREFIXES = (
     'google/',
 )
 
-THINKING_PREFIXES = ('claude-3-7', 'claude-sonnet-4', 'claude-opus-4', 'claude-haiku-4')
-
 
 def gate_model_name(model: str) -> str:
     """Strip routing prefixes so ``openrouter/anthropic/claude-opus-4-7`` matches Claude gates."""
@@ -47,15 +45,9 @@ def gate_model_name(model: str) -> str:
     return m
 
 
-def matches_reasoning_prefix(model: str, prefixes: tuple[str, ...]) -> bool:
-    """Same rule as :meth:`ChatBase._matches_reasoning_prefix` (duplicated to avoid circular imports)."""
-    m = (model or '').lower()
-    return any(m == p or m.startswith(f'{p}-') or m.startswith(f'{p}.') for p in prefixes)
-
-
-def build_anthropic_thinking_kwargs(model_gate: str, model_output_tokens: int) -> Dict[str, Any]:
+def build_anthropic_thinking_kwargs(model_gate: str, model_output_tokens: int, enabled: bool) -> Dict[str, Any]:
     """Return extra ``ChatAnthropic`` kwargs for extended thinking, or ``{}`` if disabled."""
-    if not matches_reasoning_prefix(model_gate, THINKING_PREFIXES):
+    if not enabled:
         return {}
     out: Dict[str, Any] = {'temperature': 1}
     if not model_gate.startswith('claude-opus-4-7'):
