@@ -2,6 +2,15 @@
 
 Voice Builder adds a microphone workflow to the RocketRide VS Code canvas. It is inspired by YapDraw's live voice loop, but it targets RocketRide `.pipe` projects instead of drawings.
 
+## Hackathon Submission
+
+Voice Builder is a RocketRide contributor-track feature: it introduces voice as a first-class editor input for building and correcting `.pipe` workflows.
+
+- **Problem identified:** visual pipeline editing is powerful, but adding nodes, routing services, and fixing mistakes by hand can interrupt flow during fast agent prototyping.
+- **What changed:** the VS Code canvas now has a microphone toolbar action, a live Voice panel, browser/WebView audio capture, Deepgram streaming transcription, a host-side planner, existing document/canvas apply integration, revert support, and local usage metrics.
+- **Why it matters:** RocketRide can now route natural-language build intent into the same project mutation path developers already trust for normal canvas edits.
+- **Demo video:** [RocketRide Voice Builder Promo](media/rocketride-voice-builder-promo.mp4).
+
 ## What It Does
 
 - Streams microphone audio from the canvas toolbar to Deepgram.
