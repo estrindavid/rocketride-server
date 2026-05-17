@@ -36,7 +36,7 @@
 
 import { ReactElement, useCallback, useEffect, useRef, useState } from 'react';
 import { ReactFlow, Background, SelectionMode, useReactFlow } from '@xyflow/react';
-import { Settings } from 'lucide-react';
+import { Mic, MicOff, Settings } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 
 import './reactflow-overrides.css';
@@ -59,6 +59,8 @@ import { useToolbarOrientation } from './toolbar';
 import CreateNodePanel from './panels/create-node/CreateNodePanel';
 import EmptyCanvasPrompt from './EmptyCanvasPrompt';
 import NodeConfigPanel from './panels/node-config';
+import VoiceBuilderPanel from './voice/VoiceBuilderPanel';
+import { prepareVoiceProjectEdit } from './voice/applyVoiceProjectEdit';
 import FitIcon from '../../../assets/icons/FitIcon';
 import LockIcon from '../../../assets/icons/LockIcon';
 import UnlockIcon from '../../../assets/icons/UnlockIcon';
@@ -67,11 +69,12 @@ import ZoomOutIcon from '../../../assets/icons/ZoomOutIcon';
 import NoteIcon from '../../../assets/icons/NoteIcon';
 import TidyIcon from '../../../assets/icons/TidyIcon';
 
-import { INodeType } from '../types';
+import { INodeType, IVoiceBuilderMetricEvent } from '../types';
 import { useFlowProject } from '../context/FlowProjectContext';
 import { isInVSCode } from '../../../themes/vscode';
 import { useAutoLayout } from '../hooks/useAutoLayout';
 import { useTemplateInstantiator } from '../hooks/useTemplateInstantiator';
+import { useVoiceTranscription } from './voice/useVoiceTranscription';
 
 // =============================================================================
 // Node type registry — maps NodeType to its React component
@@ -187,7 +190,7 @@ const ToolbarDivider = () => {
  */
 export default function Canvas(): ReactElement {
 	// --- Graph state from context ------------------------------------------
-	const { canvasRef, nodes, edges, nodeMap, setNodes, onNodesChange, onEdgesChange, onEdgeConnect, onNodesDelete, onDragOver, onDrop, onNodeDragStop, isValidConnection, editingNodeId, setEditingNodeId, addNode, onContentUpdated, isFlowReady } = useFlowGraph();
+	const { canvasRef, nodes, edges, nodeMap, setNodes, onNodesChange, onEdgesChange, onEdgeConnect, onNodesDelete, onDragOver, onDrop, onNodeDragStop, isValidConnection, editingNodeId, setEditingNodeId, addNode, onContentUpdated, loadData, isFlowReady } = useFlowGraph();
 
 	// --- Preferences from context ------------------------------------------
 	const { navigationMode, setNavigationMode, isReadonly, isLocked, toggleLock, projectLayout, getPreference, setPreference } = useFlowPreferences();
@@ -201,8 +204,13 @@ export default function Canvas(): ReactElement {
 		[setPreference]
 	);
 
-	const { onUndo, onRedo, onViewportChange, isDirty, isNew, onSave, initialViewport } = useFlowProject();
+	const { currentProject, onContentChanged, onUndo, onRedo, onViewportChange, isDirty, isNew, onSave, initialViewport, voiceBuilder } = useFlowProject();
 	const { fitView, zoomIn, zoomOut, setViewport } = useReactFlow();
+
+	const currentProjectRef = useRef(currentProject);
+	useEffect(() => {
+		currentProjectRef.current = currentProject;
+	}, [currentProject]);
 
 	// Keep a ref so the restore handler always sees the latest viewport value
 	// without needing to re-register the event listener.
@@ -285,6 +293,127 @@ export default function Canvas(): ReactElement {
 
 	// --- Panel state -------------------------------------------------------
 	const [showCreatePanel, setShowCreatePanel] = useState(false);
+	const [showVoicePanel, setShowVoicePanel] = useState(false);
+	const [voiceUtterances, setVoiceUtterances] = useState<string[]>([]);
+	const [voiceApplyState, setVoiceApplyState] = useState<{ status: 'idle' | 'applying' | 'applied' | 'error'; summary?: string; error?: string }>({ status: 'idle' });
+	const [voiceAppliedCount, setVoiceAppliedCount] = useState(0);
+	const voiceApplyQueueRef = useRef<Promise<void>>(Promise.resolve());
+	const lastVoiceProjectRef = useRef<typeof currentProject | null>(null);
+	const openedExternalCaptureRef = useRef(false);
+
+	const getTranscriptionToken = useCallback(() => {
+		if (!voiceBuilder) return Promise.reject(new Error('Voice builder is not configured'));
+		if (voiceBuilder.status && !voiceBuilder.status.enabled) return Promise.reject(new Error(voiceBuilder.status.errors[0] ?? 'Voice builder is not configured'));
+		return voiceBuilder.getTranscriptionToken();
+	}, [voiceBuilder]);
+
+	const trackVoiceEvent = useCallback(
+		(event: IVoiceBuilderMetricEvent) => {
+			voiceBuilder?.trackEvent?.(event);
+		},
+		[voiceBuilder]
+	);
+
+	const handleVoiceUtterance = useCallback((utterance: string) => {
+		setVoiceUtterances((prev) => [...prev, utterance].slice(-6));
+		trackVoiceEvent({ name: 'utteranceCompleted', transcriptLength: utterance.length });
+		if (!voiceBuilder) return;
+
+		const applyUtterance = async () => {
+			setVoiceApplyState({ status: 'applying' });
+			try {
+				const baseProject = currentProjectRef.current;
+				const result = await voiceBuilder.generateProjectEdit(utterance, baseProject);
+				const nextProject = prepareVoiceProjectEdit(baseProject, result.project);
+				lastVoiceProjectRef.current = baseProject;
+				currentProjectRef.current = nextProject;
+				loadData(nextProject);
+				onContentChanged?.(nextProject);
+				setVoiceAppliedCount((count) => count + 1);
+				setVoiceApplyState({ status: 'applied', summary: result.summary ?? 'Applied voice edit' });
+				trackVoiceEvent({ name: 'editApplied', transcriptLength: utterance.length, componentCount: nextProject.components?.length ?? 0 });
+			} catch (err) {
+				const message = err instanceof Error ? err.message : 'Unable to apply voice edit';
+				setVoiceApplyState({ status: 'error', error: message });
+				trackVoiceEvent({ name: 'editFailed', transcriptLength: utterance.length, error: message });
+			}
+		};
+
+		voiceApplyQueueRef.current = voiceApplyQueueRef.current.then(applyUtterance, applyUtterance);
+		void voiceApplyQueueRef.current;
+	}, [loadData, onContentChanged, trackVoiceEvent, voiceBuilder]);
+
+	const voiceTranscription = useVoiceTranscription({
+		getTranscriptionToken,
+		onUtterance: handleVoiceUtterance,
+		onError: (message) => {
+			if (/microphone permission denied|permissions policy/i.test(message) && !openedExternalCaptureRef.current) {
+				openedExternalCaptureRef.current = true;
+				voiceBuilder?.openExternalCapture?.();
+				setVoiceApplyState({ status: 'applied', summary: 'Opened browser voice capture. Use that window for microphone input.' });
+			}
+		},
+	});
+
+	useEffect(() => {
+		const handler = (event: Event) => {
+			const transcript = (event as CustomEvent<{ transcript?: string }>).detail?.transcript;
+			if (transcript) {
+				setShowVoicePanel(true);
+				handleVoiceUtterance(transcript);
+			}
+		};
+		window.addEventListener('rocketride:voiceUtterance', handler);
+		return () => window.removeEventListener('rocketride:voiceUtterance', handler);
+	}, [handleVoiceUtterance]);
+
+	const handleVoiceToggle = useCallback(() => {
+		setShowVoicePanel(true);
+		if (!voiceBuilder) {
+			setVoiceApplyState({ status: 'error', error: 'Voice builder bridge is not available. Reload the Extension Development Host.' });
+			return;
+		}
+		if (voiceBuilder.status && !voiceBuilder.status.enabled) {
+			setVoiceApplyState({ status: 'error', error: voiceBuilder.status.errors[0] ?? 'Voice builder is not configured' });
+			return;
+		}
+		if (voiceTranscription.isListening || voiceTranscription.isStarting) {
+			voiceTranscription.stop();
+			trackVoiceEvent({ name: 'sessionStopped' });
+		} else {
+			trackVoiceEvent({ name: 'sessionStarted' });
+			void voiceTranscription.start();
+		}
+	}, [trackVoiceEvent, voiceBuilder, voiceTranscription]);
+
+	const handleVoiceReset = useCallback(() => {
+		voiceTranscription.reset();
+		setVoiceUtterances([]);
+		setVoiceApplyState({ status: 'idle' });
+		setVoiceAppliedCount(0);
+		lastVoiceProjectRef.current = null;
+	}, [voiceTranscription]);
+
+	const handleVoiceRevertLastEdit = useCallback(() => {
+		const previousProject = lastVoiceProjectRef.current;
+		if (!previousProject) return;
+
+		lastVoiceProjectRef.current = null;
+		currentProjectRef.current = previousProject;
+		loadData(previousProject);
+		onContentChanged?.(previousProject);
+		setVoiceAppliedCount((count) => Math.max(0, count - 1));
+		setVoiceApplyState({ status: 'applied', summary: 'Reverted last voice edit' });
+		trackVoiceEvent({ name: 'editReverted', componentCount: previousProject.components?.length ?? 0 });
+	}, [loadData, onContentChanged, trackVoiceEvent]);
+
+	const handleVoicePanelClose = useCallback(() => {
+		voiceTranscription.stop();
+		if (voiceTranscription.isListening || voiceTranscription.isStarting) {
+			trackVoiceEvent({ name: 'sessionStopped' });
+		}
+		setShowVoicePanel(false);
+	}, [trackVoiceEvent, voiceTranscription]);
 
 	/** Whether the node config panel should be shown. */
 	const showConfigPanel = !!editingNodeId;
@@ -332,6 +461,9 @@ export default function Canvas(): ReactElement {
 					<NoteIcon color="currentColor" size={18} />
 				</ToolbarButton>
 			)}
+			<ToolbarButton title={!voiceBuilder ? 'Voice builder unavailable' : voiceBuilder.status && !voiceBuilder.status.enabled ? 'Voice builder setup needed' : voiceTranscription.isListening || voiceTranscription.isStarting ? 'Stop voice builder' : 'Start voice builder'} onClick={handleVoiceToggle} isActive={showVoicePanel || voiceTranscription.isListening || voiceTranscription.isStarting} forceColor={voiceTranscription.isListening ? 'var(--rr-brand)' : !voiceBuilder || (voiceBuilder.status && !voiceBuilder.status.enabled) ? 'var(--rr-color-warning)' : undefined}>
+				{voiceTranscription.isListening || voiceTranscription.isStarting ? <MicOff size={16} /> : <Mic size={16} />}
+			</ToolbarButton>
 			{!isLocked && <ToolbarDivider />}
 			{!isReadonly && (
 				<ToolbarButton title={isLocked ? 'Unlock canvas' : 'Lock canvas'} onClick={toggleLock} isActive={isLocked}>
@@ -386,6 +518,34 @@ export default function Canvas(): ReactElement {
 
 	return (
 		<div ref={canvasRef} style={{ width: '100%', height: '100%', position: 'relative' }}>
+			<button
+				type="button"
+				title={!voiceBuilder ? 'Voice builder unavailable' : voiceBuilder.status && !voiceBuilder.status.enabled ? 'Voice builder setup needed' : voiceTranscription.isListening || voiceTranscription.isStarting ? 'Stop voice builder' : 'Start voice builder'}
+				onClick={handleVoiceToggle}
+				style={{
+					position: 'absolute',
+					top: 12,
+					left: 12,
+					zIndex: 1350,
+					height: 34,
+					padding: '0 12px',
+					display: 'inline-flex',
+					alignItems: 'center',
+					gap: 8,
+					border: '1px solid var(--rr-border)',
+					borderRadius: 8,
+					backgroundColor: 'var(--rr-bg-widget)',
+					color: voiceTranscription.isListening ? 'var(--rr-brand)' : !voiceBuilder || (voiceBuilder.status && !voiceBuilder.status.enabled) ? 'var(--rr-color-warning)' : 'var(--rr-text-primary)',
+					boxShadow: '0 6px 18px rgba(0,0,0,0.22)',
+					fontFamily: 'var(--rr-font-family)',
+					fontSize: 'var(--rr-font-size-widget)',
+					fontWeight: 600,
+					cursor: 'pointer',
+				}}
+			>
+				{voiceTranscription.isListening || voiceTranscription.isStarting ? <MicOff size={16} /> : <Mic size={16} />}
+				<span>Voice</span>
+			</button>
 			<FloatingToolbar position={toolbarPosition} onPositionChange={handleToolbarPositionChange}>
 				{canvasToolbar}
 			</FloatingToolbar>
@@ -436,6 +596,10 @@ export default function Canvas(): ReactElement {
 
 			{/* Node config panel — slides in from the right */}
 			{showConfigPanel && editingNode && <NodeConfigPanel node={editingNode as unknown as import('../types').INode} onClose={() => setEditingNodeId(undefined)} />}
+
+			{/* Voice builder panel — captures speech and applies generated project edits */}
+			{showVoicePanel && <VoiceBuilderPanel isListening={voiceTranscription.isListening} isStarting={voiceTranscription.isStarting} isApplying={voiceApplyState.status === 'applying'} interimTranscript={voiceTranscription.interimTranscript} finalTranscript={voiceTranscription.finalTranscript} error={voiceTranscription.error ?? voiceApplyState.error ?? null} applySummary={voiceApplyState.summary} configErrors={voiceBuilder?.status?.enabled === false ? voiceBuilder.status.errors : undefined} appliedCount={voiceAppliedCount} canRevertLastEdit={lastVoiceProjectRef.current !== null} utterances={voiceUtterances} onToggleListening={handleVoiceToggle} onReset={handleVoiceReset} onRevertLastEdit={handleVoiceRevertLastEdit} onClose={handleVoicePanelClose} />}
+
 			{/* Configuration reminder after template instantiation */}
 			{configSnackbar !== null && (
 				<div

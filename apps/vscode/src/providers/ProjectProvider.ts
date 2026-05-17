@@ -16,6 +16,8 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as http from 'http';
+import * as crypto from 'crypto';
 import { TaskStatus, GenericEvent, ConnectionState, PIPE_BUILDER_APP_ID } from '../shared/types';
 import { ConnectionManager } from '../connection/connection';
 import { ConfigManager } from '../config';
@@ -24,6 +26,7 @@ import { getLogger } from '../shared/util/output';
 import { icons } from '../shared/util/icons';
 import { PipelineFileParser } from '../shared/util/pipelineParser';
 import { isSubscribed } from '../shared/util/subscriptionGate';
+import { createDeepgramTemporaryKey, generateVoiceProjectEdit, getVoiceBuilderStatus } from './voice/voiceProjectPlanner';
 
 // =============================================================================
 // CONSTANTS
@@ -31,6 +34,7 @@ import { isSubscribed } from '../shared/util/subscriptionGate';
 
 const PREFS_KEY = 'rocketride.prefs';
 const LAYOUTS_KEY = 'rocketride.layouts';
+const VOICE_METRICS_KEY = 'rocketride.voiceBuilder.metrics';
 
 // =============================================================================
 // TYPES
@@ -45,6 +49,21 @@ interface EditorState {
 	cachedStatuses: Record<string, TaskStatus>;
 }
 
+interface VoiceUsageMetrics {
+	totalEvents: number;
+	sessionStarted: number;
+	sessionStopped: number;
+	utteranceCompleted: number;
+	editApplied: number;
+	editFailed: number;
+	editReverted: number;
+	totalTranscriptChars: number;
+	totalAppliedComponents: number;
+	lastEventAt?: string;
+	lastProject?: string;
+	lastError?: string;
+}
+
 // =============================================================================
 // PROVIDER
 // =============================================================================
@@ -55,6 +74,9 @@ export class ProjectProvider implements vscode.CustomTextEditorProvider {
 	private connectionManager = ConnectionManager.getInstance();
 	private logger = getLogger();
 	private savesForRun: Set<string> = new Set();
+	private voiceCaptureServer?: http.Server;
+	private voiceCapturePort?: number;
+	private voiceCaptureToken = crypto.randomBytes(16).toString('hex');
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.registerCommands();
@@ -259,6 +281,207 @@ export class ProjectProvider implements vscode.CustomTextEditorProvider {
 		commands.forEach((command) => this.context.subscriptions.push(command));
 	}
 
+	private async recordVoiceMetric(event: Record<string, unknown>, uri: vscode.Uri): Promise<void> {
+		const name = typeof event.name === 'string' ? event.name : 'unknown';
+		const existing = this.context.workspaceState.get<VoiceUsageMetrics>(VOICE_METRICS_KEY) ?? {
+			totalEvents: 0,
+			sessionStarted: 0,
+			sessionStopped: 0,
+			utteranceCompleted: 0,
+			editApplied: 0,
+			editFailed: 0,
+			editReverted: 0,
+			totalTranscriptChars: 0,
+			totalAppliedComponents: 0,
+		};
+
+		const next: VoiceUsageMetrics = {
+			...existing,
+			totalEvents: existing.totalEvents + 1,
+			lastEventAt: new Date().toISOString(),
+			lastProject: uri.toString(),
+		};
+
+		if (name in next && typeof next[name as keyof VoiceUsageMetrics] === 'number') {
+			(next as unknown as Record<string, number>)[name] = ((next as unknown as Record<string, number>)[name] ?? 0) + 1;
+		}
+		if (typeof event.transcriptLength === 'number') {
+			next.totalTranscriptChars += event.transcriptLength;
+		}
+		if (name === 'editApplied' && typeof event.componentCount === 'number') {
+			next.totalAppliedComponents += event.componentCount;
+		}
+		if (name === 'editFailed' && typeof event.error === 'string') {
+			next.lastError = event.error;
+		}
+
+		await this.context.workspaceState.update(VOICE_METRICS_KEY, next);
+
+		if (name === 'editApplied' || name === 'editFailed' || name === 'editReverted') {
+			this.logger.output(`${icons.pipeline} Voice Builder ${name}: ${next.editApplied} applied, ${next.editFailed} failed, ${next.editReverted} reverted`);
+		}
+	}
+
+	private async ensureVoiceCaptureServer(): Promise<number> {
+		if (this.voiceCaptureServer && this.voiceCapturePort) return this.voiceCapturePort;
+
+		this.voiceCaptureServer = http.createServer((req, res) => {
+			this.handleVoiceCaptureRequest(req, res).catch((error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				res.writeHead(500, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ error: message }));
+			});
+		});
+
+		await new Promise<void>((resolve, reject) => {
+			this.voiceCaptureServer!.once('error', reject);
+			this.voiceCaptureServer!.listen(0, '127.0.0.1', () => resolve());
+		});
+
+		const address = this.voiceCaptureServer.address();
+		if (!address || typeof address === 'string') throw new Error('Voice capture server did not return a local port');
+		this.voiceCapturePort = address.port;
+		return address.port;
+	}
+
+	private async handleVoiceCaptureRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+		const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+		const token = url.searchParams.get('token');
+		const allow = {
+			'Access-Control-Allow-Origin': '*',
+			'Access-Control-Allow-Headers': 'content-type',
+			'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+		};
+
+		if (req.method === 'OPTIONS') {
+			res.writeHead(204, allow);
+			res.end();
+			return;
+		}
+
+		if (token !== this.voiceCaptureToken) {
+			res.writeHead(403, { ...allow, 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: 'Invalid voice capture token' }));
+			return;
+		}
+
+		if (req.method === 'GET' && url.pathname === '/') {
+			res.writeHead(200, { ...allow, 'Content-Type': 'text/html; charset=utf-8' });
+			res.end(this.getVoiceCaptureHtml(this.voiceCaptureToken));
+			return;
+		}
+
+		if (req.method === 'GET' && url.pathname === '/deepgram-token') {
+			const key = await createDeepgramTemporaryKey();
+			res.writeHead(200, { ...allow, 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ key }));
+			return;
+		}
+
+		if (req.method === 'POST' && url.pathname === '/utterance') {
+			const body = await this.readRequestBody(req);
+			const parsed = JSON.parse(body || '{}') as { transcript?: string };
+			const transcript = typeof parsed.transcript === 'string' ? parsed.transcript.trim() : '';
+			if (transcript) {
+				this.logger.output(`${icons.pipeline} Voice Builder heard: ${transcript}`);
+				for (const editorState of this.editorStates.values()) {
+					if (editorState.isReady && !editorState.isDisposed) {
+						editorState.webviewPanel.webview.postMessage({ type: 'voice:externalUtterance', transcript });
+					}
+				}
+			}
+			res.writeHead(200, { ...allow, 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ ok: true }));
+			return;
+		}
+
+		res.writeHead(404, { ...allow, 'Content-Type': 'application/json' });
+		res.end(JSON.stringify({ error: 'Not found' }));
+	}
+
+	private readRequestBody(req: http.IncomingMessage): Promise<string> {
+		return new Promise((resolve, reject) => {
+			let body = '';
+			req.setEncoding('utf8');
+			req.on('data', (chunk) => {
+				body += chunk;
+				if (body.length > 1024 * 1024) {
+					req.destroy(new Error('Voice capture request too large'));
+				}
+			});
+			req.on('end', () => resolve(body));
+			req.on('error', reject);
+		});
+	}
+
+	private async openExternalVoiceCapture(): Promise<void> {
+		const port = await this.ensureVoiceCaptureServer();
+		const uri = vscode.Uri.parse(`http://127.0.0.1:${port}/?token=${this.voiceCaptureToken}`);
+		await vscode.env.openExternal(uri);
+		this.logger.output(`${icons.pipeline} Opened browser Voice Builder capture window`);
+	}
+
+	private getVoiceCaptureHtml(token: string): string {
+		const safeToken = JSON.stringify(token);
+		return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RocketRide Voice Capture</title>
+<style>
+body{margin:0;min-height:100vh;background:#111;color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center}
+main{width:min(680px,calc(100vw - 32px));border:1px solid #333;border-radius:10px;background:#191919;padding:22px;box-shadow:0 14px 42px rgba(0,0,0,.35)}
+h1{font-size:22px;margin:0 0 8px}p{color:#aaa;line-height:1.45}button{height:40px;padding:0 16px;border:0;border-radius:7px;background:#2387b8;color:white;font-weight:700;cursor:pointer}button.stop{background:#555}.box{min-height:90px;border:1px solid #333;border-radius:8px;background:#101010;padding:12px;margin:16px 0;color:#eee}.status{color:#aaa;font-size:13px}.err{color:#ff8a70}
+</style>
+</head>
+<body>
+<main>
+<h1>RocketRide Voice Capture</h1>
+<p>This browser window captures microphone audio and sends completed voice commands back to the RocketRide canvas.</p>
+<button id="toggle">Start listening</button>
+<div class="box" id="transcript">Voice ready</div>
+<div class="status" id="status">Idle</div>
+</main>
+<script>
+const token=${safeToken};
+let socket, recorder, stream, finalText='', interimText='', timer, listening=false;
+const sentLiveKeys=new Set();
+const transcriptEl=document.getElementById('transcript');
+const statusEl=document.getElementById('status');
+const toggle=document.getElementById('toggle');
+function setStatus(text,isError){statusEl.textContent=text;statusEl.className=isError?'status err':'status'}
+function norm(text){return String(text||'').replace(/\\s+/g,' ').trim()}
+function render(){transcriptEl.textContent=norm(finalText+' '+interimText)||'Voice ready'}
+function postUtterance(text){return fetch('/utterance?token='+token,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({transcript:text})})}
+function liveKey(text){const lower=text.toLowerCase(); if(!/\\b(add|create|insert|connect|wire|rename|name|delete|remove|clear)\\b/.test(lower))return ''; const mode=/\\b(delete|remove|clear)\\b/.test(lower)?'delete:':'edit:'; if(/gemini|google/.test(lower))return mode+'gemini'; if(/openai|gpt|4o/.test(lower))return mode+'openai'; if(/anthropic|claude/.test(lower))return mode+'claude'; if(/memory/.test(lower))return mode+'memory'; if(/rocket\\s*ride|rocketride|wave|agent/.test(lower))return mode+'agent'; return mode+'general'}
+function maybePostLive(){const text=norm(finalText+' '+interimText); const key=liveKey(text); if(!key||sentLiveKeys.has(key)||text.length<16)return; sentLiveKeys.add(key); setStatus('Sent live command to RocketRide. Keep speaking to refine it.'); postUtterance(text)}
+function flush(){const text=norm(finalText+' '+interimText); finalText=''; interimText=''; render(); if(text) postUtterance(text)}
+function schedule(){clearTimeout(timer); timer=setTimeout(flush,1000)}
+function deepgramUrl(){const u=new URL('wss://api.deepgram.com/v1/listen'); u.searchParams.set('model','nova-2'); u.searchParams.set('language','en-US'); u.searchParams.set('interim_results','true'); u.searchParams.set('smart_format','true'); u.searchParams.set('utterance_end_ms','1000'); u.searchParams.set('endpointing','300'); return u.toString()}
+async function start(){
+ try{
+  setStatus('Requesting microphone...');
+  const keyResp=await fetch('/deepgram-token?token='+token);
+  if(!keyResp.ok) throw new Error(await keyResp.text());
+  const {key}=await keyResp.json();
+  stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  socket=new WebSocket(deepgramUrl(),['token',key]);
+  recorder=new MediaRecorder(stream);
+  recorder.ondataavailable=e=>{if(e.data.size>0&&socket&&socket.readyState===WebSocket.OPEN)socket.send(e.data)};
+  socket.onopen=()=>{recorder.start(250); listening=true; toggle.textContent='Stop listening'; toggle.className='stop'; setStatus('Listening. Speak a RocketRide command.')};
+  socket.onmessage=e=>{let m; try{m=JSON.parse(e.data)}catch{return} if(m.type==='UtteranceEnd'){flush();return} const t=norm(m.channel?.alternatives?.[0]?.transcript||''); if(!t)return; if(m.is_final){finalText=norm(finalText+' '+t); interimText=''; if(m.speech_final)flush(); else schedule()}else{interimText=t; schedule()} render(); maybePostLive()};
+  socket.onerror=()=>setStatus('Deepgram websocket failed',true);
+  socket.onclose=()=>{if(listening)stop()};
+ }catch(e){setStatus(e&&e.message?e.message:String(e),true); stop()}
+}
+function stop(){clearTimeout(timer); flush(); listening=false; if(recorder&&recorder.state!=='inactive')recorder.stop(); if(socket&&socket.readyState<=1)socket.close(); if(stream)stream.getTracks().forEach(t=>t.stop()); recorder=null; socket=null; stream=null; toggle.textContent='Start listening'; toggle.className=''; setStatus('Idle')}
+toggle.onclick=()=>listening?stop():start();
+</script>
+</body>
+</html>`;
+	}
+
 	// =========================================================================
 	// RESOLVE CUSTOM TEXT EDITOR
 	// =========================================================================
@@ -326,6 +549,7 @@ export class ProjectProvider implements vscode.CustomTextEditorProvider {
 						isSubscribed: isSubscribed(client, PIPE_BUILDER_APP_ID),
 						statuses: editorState.cachedStatuses,
 						serverHost: this.connectionManager.getHttpUrl(),
+						voiceStatus: getVoiceBuilderStatus(),
 					});
 					webview.postMessage({ type: 'project:dirtyState', isDirty: document.isDirty, isNew: document.isUntitled });
 
@@ -370,6 +594,49 @@ export class ProjectProvider implements vscode.CustomTextEditorProvider {
 
 				case 'project:requestSave': {
 					await document.save();
+					break;
+				}
+
+				case 'voice:deepgramToken': {
+					try {
+						const key = await createDeepgramTemporaryKey();
+						webview.postMessage({ type: 'voice:deepgramTokenResponse', requestId: data.requestId, key });
+					} catch (error: unknown) {
+						const msg = error instanceof Error ? error.message : String(error);
+						webview.postMessage({ type: 'voice:deepgramTokenResponse', requestId: data.requestId, error: msg });
+					}
+					break;
+				}
+
+				case 'voice:generateProjectEdit': {
+					try {
+						const result = await generateVoiceProjectEdit({
+							transcript: data.transcript as string,
+							currentProject: data.currentProject as Record<string, unknown>,
+							services: data.services as Record<string, unknown>,
+						});
+						webview.postMessage({ type: 'voice:generateProjectEditResponse', requestId: data.requestId, project: result.project, summary: result.summary });
+					} catch (error: unknown) {
+						const msg = error instanceof Error ? error.message : String(error);
+						webview.postMessage({ type: 'voice:generateProjectEditResponse', requestId: data.requestId, error: msg });
+					}
+					break;
+				}
+
+				case 'voice:openExternalCapture': {
+					try {
+						await this.openExternalVoiceCapture();
+					} catch (error: unknown) {
+						const msg = error instanceof Error ? error.message : String(error);
+						vscode.window.showErrorMessage(`Unable to open browser voice capture: ${msg}`);
+					}
+					break;
+				}
+
+				case 'voice:metric': {
+					this.recordVoiceMetric(data.event as Record<string, unknown>, document.uri).catch((error: unknown) => {
+						this.logger.error(`Recording voice metric failed: ${error}`);
+					});
 					break;
 				}
 
@@ -857,6 +1124,9 @@ export class ProjectProvider implements vscode.CustomTextEditorProvider {
 	// =========================================================================
 
 	public dispose(): void {
+		this.voiceCaptureServer?.close();
+		this.voiceCaptureServer = undefined;
+		this.voiceCapturePort = undefined;
 		this.disposables.forEach((disposable) => disposable.dispose());
 		this.disposables = [];
 	}

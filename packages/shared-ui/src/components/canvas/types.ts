@@ -45,6 +45,43 @@ export { IServiceCapabilities, ITaskState, DEFAULT_TOOLCHAIN_STATE } from '../..
 export const PIPELINE_SCHEMA_VERSION = 1;
 
 // ============================================================================
+// Voice Builder Host Adapter
+// ============================================================================
+
+/** Host-provided bridge used by the canvas voice builder. */
+export interface IVoiceBuilderMetricEvent {
+	name: 'sessionStarted' | 'sessionStopped' | 'utteranceCompleted' | 'editApplied' | 'editFailed' | 'editReverted';
+	transcriptLength?: number;
+	componentCount?: number;
+	error?: string;
+}
+
+export interface IVoiceBuilderStatus {
+	enabled: boolean;
+	deepgramConfigured: boolean;
+	plannerConfigured: boolean;
+	errors: string[];
+	model?: string;
+}
+
+export interface IVoiceBuilderAdapter {
+	/** Host-side readiness summary. */
+	status?: IVoiceBuilderStatus;
+
+	/** Returns a temporary browser-safe Deepgram key for live transcription. */
+	getTranscriptionToken: () => Promise<{ key: string }>;
+
+	/** Generates an updated project from a completed spoken instruction. */
+	generateProjectEdit: (transcript: string, currentProject: import('../../types/project').IProject) => Promise<{ project: import('../../types/project').IProject; summary?: string }>;
+
+	/** Records a local usage metric for demo and hackathon validation. */
+	trackEvent?: (event: IVoiceBuilderMetricEvent) => void;
+
+	/** Opens a browser-based mic capture fallback when the VS Code webview blocks getUserMedia. */
+	openExternalCapture?: () => void;
+}
+
+// ============================================================================
 // Node Type Discriminator
 // ============================================================================
 

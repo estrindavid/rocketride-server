@@ -14,7 +14,7 @@
  *   ProjectHost (Node.js) ↔ postMessage ↔ ProjectWebview (browser) → ProjectView (pure UI)
  */
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 
 import { applyTheme } from 'shared/themes';
 import type { ThemeTokens } from 'shared/themes/tokens';
@@ -44,6 +44,12 @@ const ProjectWebview: React.FC = () => {
 	const [subscribed, setSubscribed] = useState(true);
 	const [isReadonly, setIsReadonly] = useState(false);
 	const [showCheckout, setShowCheckout] = useState(false);
+	const [voiceStatus, setVoiceStatus] = useState<{ enabled: boolean; deepgramConfigured: boolean; plannerConfigured: boolean; errors: string[]; model?: string }>({
+		enabled: false,
+		deepgramConfigured: false,
+		plannerConfigured: false,
+		errors: ['Voice Builder status has not loaded'],
+	});
 
 	// Checkout flow state — populated by host responses to checkout:* messages
 	const [checkoutPlans, setCheckoutPlans] = useState<CheckoutPlan[]>([]);
@@ -64,6 +70,9 @@ const ProjectWebview: React.FC = () => {
 	// Pending validate requests (request-ID → Promise resolver)
 	const pendingValidates = useRef<Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>>(new Map());
 	const validateCounter = useRef(0);
+	const pendingDeepgramTokens = useRef<Map<number, { resolve: (v: { key: string }) => void; reject: (e: any) => void }>>(new Map());
+	const pendingVoiceEdits = useRef<Map<number, { resolve: (v: { project: any; summary?: string }) => void; reject: (e: any) => void }>>(new Map());
+	const voiceCounter = useRef(0);
 
 	// --- Messaging ------------------------------------------------------------
 
@@ -83,6 +92,7 @@ const ProjectWebview: React.FC = () => {
 				setIsConnected(msg.isConnected);
 				if (msg.isSubscribed !== undefined) setSubscribed(msg.isSubscribed);
 				setIsReadonly(msg.isReadonly ?? false);
+				setVoiceStatus(msg.voiceStatus ?? { enabled: false, deepgramConfigured: false, plannerConfigured: false, errors: ['Voice Builder status unavailable'] });
 				setStatusMap(msg.statuses ?? {});
 				setViewState({
 					mode: vs?.mode ?? 'design',
@@ -117,6 +127,29 @@ const ProjectWebview: React.FC = () => {
 				}
 				break;
 			}
+			case 'voice:deepgramTokenResponse': {
+				const pending = pendingDeepgramTokens.current.get(msg.requestId);
+				if (pending) {
+					pendingDeepgramTokens.current.delete(msg.requestId);
+					if (msg.error) pending.reject(new Error(msg.error));
+					else if (msg.key) pending.resolve({ key: msg.key });
+					else pending.reject(new Error('Deepgram token response did not include a key'));
+				}
+				break;
+			}
+			case 'voice:generateProjectEditResponse': {
+				const pending = pendingVoiceEdits.current.get(msg.requestId);
+				if (pending) {
+					pendingVoiceEdits.current.delete(msg.requestId);
+					if (msg.error) pending.reject(new Error(msg.error));
+					else if (msg.project) pending.resolve({ project: msg.project, summary: msg.summary });
+					else pending.reject(new Error('Voice project edit response did not include a project'));
+				}
+				break;
+			}
+			case 'voice:externalUtterance':
+				window.dispatchEvent(new CustomEvent('rocketride:voiceUtterance', { detail: { transcript: msg.transcript } }));
+				break;
 			case 'shell:event': {
 				const pid = projectIdRef.current;
 				const parsed = parseServerEvent(msg.event, pid);
@@ -230,6 +263,59 @@ const ProjectWebview: React.FC = () => {
 		[sendMessage]
 	);
 
+	const requestDeepgramToken = useCallback((): Promise<{ key: string }> => {
+		return new Promise((resolve, reject) => {
+			const requestId = ++voiceCounter.current;
+			pendingDeepgramTokens.current.set(requestId, { resolve, reject });
+			sendMessage({ type: 'voice:deepgramToken', requestId });
+			setTimeout(() => {
+				if (pendingDeepgramTokens.current.has(requestId)) {
+					pendingDeepgramTokens.current.delete(requestId);
+					reject(new Error('Timed out requesting Deepgram token'));
+				}
+			}, 15000);
+		});
+	}, [sendMessage]);
+
+	const requestVoiceProjectEdit = useCallback(
+		(transcript: string, currentProject: any): Promise<{ project: any; summary?: string }> => {
+			return new Promise((resolve, reject) => {
+				const requestId = ++voiceCounter.current;
+				pendingVoiceEdits.current.set(requestId, { resolve, reject });
+				sendMessage({ type: 'voice:generateProjectEdit', requestId, transcript, currentProject, services: servicesJson });
+				setTimeout(() => {
+					if (pendingVoiceEdits.current.has(requestId)) {
+						pendingVoiceEdits.current.delete(requestId);
+						reject(new Error('Timed out generating voice project edit'));
+					}
+				}, 30000);
+			});
+		},
+		[sendMessage, servicesJson]
+	);
+
+	const trackVoiceEvent = useCallback(
+		(event: Record<string, unknown>) => {
+			sendMessage({ type: 'voice:metric', event });
+		},
+		[sendMessage]
+	);
+
+	const openExternalCapture = useCallback(() => {
+		sendMessage({ type: 'voice:openExternalCapture' });
+	}, [sendMessage]);
+
+	const voiceBuilder = useMemo(
+		() => ({
+			status: voiceStatus,
+			getTranscriptionToken: requestDeepgramToken,
+			generateProjectEdit: requestVoiceProjectEdit,
+			trackEvent: trackVoiceEvent,
+			openExternalCapture,
+		}),
+		[openExternalCapture, requestDeepgramToken, requestVoiceProjectEdit, trackVoiceEvent, voiceStatus]
+	);
+
 	const handlePipelineAction = useCallback(
 		(action: 'run' | 'stop' | 'restart', source?: string) => {
 			sendMessage({ type: 'status:pipelineAction', action, source });
@@ -314,7 +400,7 @@ const ProjectWebview: React.FC = () => {
 
 	return (
 		<>
-			<ProjectView project={project} servicesJson={servicesJson} isConnected={isConnected} isSubscribed={subscribed} statusMap={statusMap} serverHost={serverHost} isDirty={isDirty} isNew={isNew} initialViewState={viewState} initialPrefs={prefs} traceEvents={traceEvents} onContentChanged={handleContentChanged} onValidate={handleValidate} onPipelineAction={handlePipelineAction} onViewStateChange={handleViewStateChange} onPrefsChange={handlePrefsChange} onOpenLink={handleOpenLink} onSave={handleSave} onTraceClear={handleTraceClear} isReadonly={isReadonly} />
+			<ProjectView project={project} servicesJson={servicesJson} isConnected={isConnected} isSubscribed={subscribed} statusMap={statusMap} serverHost={serverHost} isDirty={isDirty} isNew={isNew} initialViewState={viewState} initialPrefs={prefs} traceEvents={traceEvents} onContentChanged={handleContentChanged} onValidate={handleValidate} onPipelineAction={handlePipelineAction} onViewStateChange={handleViewStateChange} onPrefsChange={handlePrefsChange} onOpenLink={handleOpenLink} onSave={handleSave} onTraceClear={handleTraceClear} voiceBuilder={voiceBuilder} isReadonly={isReadonly} />
 			{showCheckout && stripeKey && <CheckoutModal appName="RocketRide" appDescription="Visual AI pipeline editor — run and deploy pipelines on RocketRide Cloud." stripePublishableKey={stripeKey} onFetchPlans={handleFetchPlans} onCreateCheckout={handleCreateCheckout} onConfirmPending={handleConfirmPending} onSuccess={handleCheckoutSuccess} onClose={() => setShowCheckout(false)} />}
 		</>
 	);
