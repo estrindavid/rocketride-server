@@ -191,7 +191,7 @@ const ProjectWebview: React.FC = () => {
 				// one, and a reload must not keep tokens from a previous session.
 				setOauthReturnUrl(msg.oauthReturnUrl);
 				setPendingOAuthTokens(undefined);
-				setEnvKeys(msg.envKeys);
+				setEnvKeys(msg.envKeys ?? []);
 				break;
 			}
 			case 'project:oauthTokens':
