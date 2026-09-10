@@ -15,7 +15,7 @@ title: TypeScript
 <p align="center">
   <a href="https://www.npmjs.com/package/rocketride"><img src="https://img.shields.io/npm/v/rocketride?color=222223&label=NPM" alt="npm" /></a>
   <a href="https://github.com/rocketride-org/rocketride-server"><img src="https://img.shields.io/github/stars/rocketride-org/rocketride-server?style=flat&color=238636&label=GitHub&logo=github&logoColor=white" alt="GitHub" /></a>
-  <a href="https://discord.gg/9hr3tdZmEG"><img src="https://img.shields.io/badge/Discord-Join-370b7a?logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://discord.gg/PMXrtenMsY"><img src="https://img.shields.io/badge/Discord-Join-370b7a?logo=discord&logoColor=white" alt="Discord" /></a>
   <a href="https://github.com/rocketride-org/rocketride-server/blob/develop/LICENSE"><img src="https://img.shields.io/badge/License-MIT-41b6e6" alt="MIT License" /></a>
 </p>
 
@@ -57,7 +57,7 @@ Don't have a pipeline yet? Visit [RocketRide on GitHub](https://github.com/rocke
 It lets you build, debug, and deploy production AI workflows without leaving your IDE -
 using a visual drag-and-drop canvas or code-first with TypeScript and Python SDKs.
 
-- **50+ ready-to-use nodes** - 13 LLM providers, 8 vector databases, OCR, NER, PII anonymization, and more
+- **100+ ready-to-use nodes** - 15+ LLM providers, 9 vector databases, OCR, NER, PII anonymization, and more
 - **High-performance C++ engine** - production-grade speed and reliability
 - **Deploy anywhere** - locally, on-premises, or self-hosted with Docker
 - **MIT licensed** - fully open source, OSI-compliant
@@ -74,6 +74,7 @@ You build your `.pipe` - and you run it against the fastest AI runtime available
 - **File upload** - `sendFiles()` with progress; streaming with `pipe()`
 - **Connection lifecycle** - Optional persist mode, reconnection, and callbacks (`onConnected`, `onDisconnected`, `onConnectError`)
 - **Full TypeScript support** - Complete type definitions
+- **Telemetry reporting** - The shared loose `report()` core via `rocketride/analytics`; each app owns its own event taxonomy ([Analytics / Telemetry Reporting](/develop/typescript/analytics))
 
 ---
 
@@ -81,21 +82,22 @@ You build your `.pipe` - and you run it against the fastest AI runtime available
 
 Configuration object passed to `new RocketRideClient(config)`.
 
-**Why it matters:** The config controls not only where you connect and how you authenticate, but also how the client behaves when the connection drops or when the server is slow to start. Getting `persist`, `maxRetryTime`, and the callbacks right avoids confusing "connection lost" vs "never connected" UX.
+**Why it matters:** The config controls not only where you connect and how you authenticate, but also how the client behaves when the connection drops or when the server is slow to start. Getting `persist` and the callbacks right avoids confusing "connection lost" vs "never connected" UX.
 
 | Property            | Type                                                     | Required | Description                                                                                                                                                                                                                                                                       |
 | ------------------- | -------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth`              | `string`                                                 | No       | API key. Optional: omit and set via `env.ROCKETRIDE_APIKEY` or `.env` (Node only), or set later with `setConnectionParams({ auth })` before calling `connect()`.                                                                                                                  |
-| `uri`               | `string`                                                 | No       | Server URI (e.g. `https://cloud.rocketride.ai` or `ws://localhost:8080`). Optional: omit and use `env.ROCKETRIDE_URI` or built-in default, or set later with `setConnectionParams({ uri })` before calling `connect()`.                                                           |
-| `env`               | `Record<string, string>`                                 | No       | Override env; if omitted, `.env` is loaded in Node (only). Used for `${ROCKETRIDE_*}` substitution in pipeline config and for `ROCKETRIDE_APIKEY`/`ROCKETRIDE_URI` when not passed as `auth`/`uri`.                                                                               |
-| `persist`           | `boolean`                                                | No       | Enable automatic reconnection with exponential backoff. Default: `false`. **Use `true`** for long-lived UIs or when the server may restart; the client will retry (250ms -> 2500ms) and call `onConnectError` on each failure until `maxRetryTime` or success.                    |
-| `maxRetryTime`      | `number`                                                 | No       | Max time in ms to keep retrying connection. Default: no limit. **Use** (e.g. 300000 for 5 min) so you can show "gave up" after a bounded time instead of retrying forever.                                                                                                        |
+| `auth`              | `string`                                                 | No       | Initial API key. Optional: omit and use `env.ROCKETRIDE_APIKEY` or pass a credential directly to `login()` or `connect()`.                                                                                                                                                      |
+| `uri`               | `string`                                                 | No       | Initial server URI (e.g. `https://cloud.rocketride.ai` or `ws://localhost:8080`). Optional: omit and use `env.ROCKETRIDE_URI` or the built-in default; `attach()`, `login()`, and `connect()` accept URI overrides.                                                             |
+| `env`               | `Record<string, string>`                                 | No       | Environment override used for `${ROCKETRIDE_*}` substitution and credential/URI defaults. If omitted in Node, the SDK copies string values from `process.env`; it does not load `.env` files.                                                                                  |
+| `persist`           | `boolean`                                                | No       | Enable automatic reconnection with capped linear backoff. Default: `false`. Retries start at 250ms, increase by 250ms after each failure, and are capped at 15 seconds. An explicit foreground connection action, `logout()`, or `detach()` cancels stale scheduled work.         |
+| `maxRetryTime`      | `number`                                                 | No       | Accepted for backward compatibility but currently ignored. Persistent reconnection has no time limit; stop it explicitly with `logout()`, `detach()`, or `disconnect()`.                                                                                                        |
 | `requestTimeout`    | `number`                                                 | No       | Default timeout in ms for each request; overridable per `request()` call. Prevents a single slow DAP call from hanging indefinitely.                                                                                                                                              |
-| `onConnected`       | `(info?: string) => Promise<void>`                       | No       | Called when connection is established. **Use** to refresh UI, refetch services, or clear "connecting" state.                                                                                                                                                                      |
-| `onDisconnected`    | `(reason?: string, hasError?: boolean) => Promise<void>` | No       | Called when connection is lost **only if** `onConnected` was already called. So "failed to connect in the first place" does _not_ fire this - use `onConnectError` for that. **Do not** call `client.disconnect()` here if you want the client to auto-reconnect in persist mode. |
-| `onConnectError`    | `(message: string) => void \| Promise<void>`             | No       | Called on each failed connection attempt (e.g. while retrying in persist mode). **Use** to show "Connection failed: ..." or "Still connecting..."; on auth failure the client stops retrying, so you can prompt the user to fix credentials and call `connect()` again.           |
+| `onConnected`       | `(info?: string) => Promise<void>`                       | No       | Called exactly once for an accepted authenticated connection generation, after authentication and best-effort monitor restoration completes.                                                                                                                                      |
+| `onDisconnected`    | `(reason?: string, hasError?: boolean) => Promise<void>` | No       | Called at most once for a generation, and only if that generation previously published `onConnected`. A failed or cancelled pre-authentication attempt does not call it. Do not call `disconnect()` here if you want persistent reconnection.                                  |
+| `onConnectError`    | `(error: ConnectionException) => void \| Promise<void>`  | No       | Called for automatic reconnect failures; the next retry waits for this callback. Foreground `login()` and `connect()` failures reject their returned promises directly. Authentication failure stops automatic authentication retries.                                      |
 | `onEvent`           | `(event: DAPMessage) => Promise<void>`                   | No       | Called for each server event (e.g. upload progress, task status). **Use** to drive progress bars or status text; event type is `event.event`, payload in `event.body`.                                                                                                            |
-| `onProtocolMessage` | `(message: string) => void`                              | No       | Optional; for logging raw DAP messages. Helpful when debugging protocol issues.                                                                                                                                                                                                   |
+| `onProtocolMessage` | `(message: string) => void`                              | No       | Optional; receives credential-redacted DAP messages for protocol debugging.                                                                                                                                                                                                         |
+| `onTrace`           | `(type: TraceType, message: DAPMessage) => void`         | No       | Called around high-level SDK requests with a credential-redacted message copy for logging or telemetry.                                                                                                                                                                             |
 | `onDebugMessage`    | `(message: string) => void`                              | No       | Optional; for debug output.                                                                                                                                                                                                                                                       |
 | `module`            | `string`                                                 | No       | Client name for logging. Default: `CLIENT-0`, `CLIENT-1`, ...                                                                                                                                                                                                                     |
 
@@ -106,11 +108,10 @@ const client = new RocketRideClient({
 	auth: process.env.ROCKETRIDE_APIKEY!,
 	uri: 'wss://cloud.rocketride.ai',
 	persist: true,
-	maxRetryTime: 300000,
 	requestTimeout: 30000,
 	onConnected: async () => setStatus('connected'),
 	onDisconnected: async () => setStatus('disconnected'),
-	onConnectError: (msg) => setStatus('error', msg),
+	onConnectError: (error) => setStatus('error', error.message),
 	onEvent: async (e) => handleServerEvent(e),
 });
 ```
@@ -123,7 +124,7 @@ const client = new RocketRideClient({
 constructor(config: RocketRideClientConfig = {})
 ```
 
-Creates a client instance; it does **not** connect until you call `connect()`. You can set up callbacks and then open the connection when ready. `auth` and `uri` are optional at construction and can be set later with `setConnectionParams()` before `connect()`.
+Creates a client instance; it does **not** open a connection until you call `attach()`, `login()`, or `connect()`. `auth` and `uri` are optional at construction; pass per-call overrides to `login()` or `connect()`, or a URI override to `attach()`.
 
 **Example:**
 
@@ -134,14 +135,26 @@ await client.connect();
 
 ### Connection
 
-| Method                | Signature                                                                      | Returns   | Description                                                                                                                                                                                                                                                                                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------ | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `connect`             | `connect(timeout?: number): Promise<void>`                                     | -         | Opens the WebSocket and performs DAP auth. Optional `timeout` (ms) bounds the connect + auth handshake (non-persist only; in persist mode timeout is not applied). In **persist** mode, if this fails the client calls `onConnectError` and schedules retries (exponential backoff); on **auth** failure it does _not_ retry so the app can fix credentials and call `connect()` again. |
-| `disconnect`          | `disconnect(): Promise<void>`                                                  | -         | Closes the connection and cancels any pending reconnection. Call when the user explicitly disconnects or the app is shutting down.                                                                                                                                                                                                                                                      |
-| `isConnected`         | `isConnected(): boolean`                                                       | `boolean` | Whether the client is currently connected. Use before calling `use()` or `send()` to avoid confusing errors.                                                                                                                                                                                                                                                                            |
-| `setConnectionParams` | `setConnectionParams(options: { uri?: string; auth?: string }): Promise<void>` | -         | Updates server URI and/or auth at runtime. If currently connected, disconnects and reconnects with the new params (in persist mode, reconnection is scheduled; otherwise reconnects once). Use when the user changes server or credentials without creating a new client.                                                                                                               |
+| Method            | Signature                                                                                                                                                     | Returns                  | Description                                                                                                                                                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `attach`          | `attach(uri?: string, options?: { timeout?: number }): Promise<void>`                                                                                          | `Promise<void>`          | Opens an anonymous WebSocket attachment without authenticating. Public `rrext_public_*` requests are available. A URI override becomes the current endpoint.                                                                                                       |
+| `detach`          | `detach(): Promise<void>`                                                                                                                                      | `Promise<void>`          | Cancels pending login and reconnect work, closes a CONNECTING or OPEN transport, and leaves the client detached. An in-flight login rejects with cancellation reason `detached`.                                                                                   |
+| `isAttached`      | `isAttached(): boolean`                                                                                                                                        | `boolean`                | Whether the WebSocket transport is open, regardless of authentication.                                                                                                                                                                                            |
+| `login`           | `login(credential?: string \| { code: string; verifier: string; redirectUri: string }, options?: { uri?: string; timeout?: number }): Promise<ConnectResult>`   | `Promise<ConnectResult>` | Attaches if needed, authenticates, restores monitor subscriptions, and returns account data. The credential and URI may override construction-time values.                                                                                                        |
+| `logout`          | `logout(): Promise<void>`                                                                                                                                      | `Promise<void>`          | Clears authentication while retaining an anonymous attachment. During an in-flight login it cancels all joined waiters with reason `logout`, discards the login transport, and establishes a fresh anonymous attachment instead of depending on deauthentication ordering. |
+| `isAuthenticated` | `isAuthenticated(): boolean`                                                                                                                                   | `boolean`                | Whether authentication succeeded for the current attachment.                                                                                                                                                                                                     |
+| `connect`         | `connect(credential?: string \| { code: string; verifier: string; redirectUri: string }, options?: { uri?: string; timeout?: number }): Promise<ConnectResult>` | `Promise<ConnectResult>` | Compatibility method that performs attach and login as one foreground operation.                                                                                                                                                                                  |
+| `disconnect`      | `disconnect(): Promise<void>`                                                                                                                                  | `Promise<void>`          | Compatibility method that performs best-effort logout/deauthentication, then cancels pending work and detaches. Call it when the user explicitly disconnects or the app is shutting down.                                                                         |
+| `isConnected`     | `isConnected(): boolean`                                                                                                                                       | `boolean`                | Compatibility alias for `isAttached()`; it does not imply authentication.                                                                                                                                                                                         |
+| `setEnv`          | `setEnv(env: Record<string, string>): void`                                                                                                                    | `void`                   | Replaces the client's environment map. `use()`/`validate()` use it for `ROCKETRIDE_*` substitution; `login()` consults `ROCKETRIDE_APIKEY` when no explicit credential is supplied.                                                                                |
 
-**How to use:** For one-off scripts, call `connect()` once, do your work, then `disconnect()`. For UIs, use `persist: true` and rely on the client to reconnect; only call `disconnect()` when the user logs out or you are done with the client. The client supports `await using` (Symbol.asyncDispose) for automatic disconnect when exiting scope.
+Concurrent foreground `login()` or `connect()` calls for the same final WebSocket endpoint and resolved credential join one operation: they share one attachment, one authentication request, and one result. A different foreground login supersedes the earlier operation. A foreground login also supersedes an automatic background reconnect, while background work never supersedes foreground work. Superseded waiters reject with `LoginAttemptCancelledError('superseded')`.
+
+`LoginAttemptCancelledError.reason` is exactly `'superseded'`, `'logout'`, or `'detached'`. It is intentionally a plain `Error`, not a `RocketRideException`. An unsolicited transport loss during login rejects with `ConnectionException` instead of a cancellation error. The first terminal cause wins for every caller joined to an operation.
+
+With `persist: true`, an unexpected loss schedules a generation-owned background reconnect using linear backoff: 250ms, 500ms, 750ms, and so on to a 15-second cap. A successful foreground login resets the delay. Foreground `attach()`, `login()`, or `connect()`, URI changes, `logout()`, `detach()`, and `disconnect()` invalidate stale timers before waiting, so stale callbacks cannot publish state. Authentication failures are not retried automatically. `maxRetryTime` is accepted for compatibility but ignored.
+
+**How to use:** For one-off scripts, call `connect()` once, do your work, then `disconnect()`. For UIs that need anonymous public calls before sign-in, call `attach()`, then `login()`, and use `logout()` to return to a fresh anonymous attachment. With `persist: true`, rely on the client to reconnect after unexpected loss; only call `detach()` or `disconnect()` when reconnection should stop. The client supports `await using` (`Symbol.asyncDispose`) for automatic disconnect when exiting scope.
 
 ### Low-level DAP
 
@@ -164,10 +177,10 @@ if (client.didFail(res)) throw new Error(res.message);
 
 | Method          | Signature                                                                                                                                                                                                                    | Returns                            | Description                                                                                                                                                                                                                                                                                                                    |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `use`           | `use(options?: { token?: string; filepath?: string; pipeline?: PipelineConfig; source?: string; threads?: number; useExisting?: boolean; args?: string[]; ttl?: number }): Promise<Record<string, any> & { token: string }>` | `Promise<{ token: string, ... }>`  | Starts a pipeline. You must pass either `pipeline` (object) or `filepath` (path to a JSON file; Node only). The client substitutes `${ROCKETRIDE_*}` in the config from its `env` (or `.env`). Returns at least `token`; use that token for `send()`, `sendFiles()`, `pipe()`, `chat()`, `getTaskStatus()`, and `terminate()`. |
+| `use`           | `use(options?: { token?: string; filepath?: string; pipeline?: PipelineConfig; source?: string; threads?: number; useExisting?: boolean; args?: string[]; ttl?: number }): Promise<Record<string, any> & { token: string }>` | `Promise<{ token: string, ... }>`  | Starts a pipeline. You must pass either `pipeline` (object) or `filepath` (path to a JSON file; Node only). The client substitutes `${ROCKETRIDE_*}` in the config from its configured environment map. Returns at least `token`; use that token for `send()`, `sendFiles()`, `pipe()`, `chat()`, `getTaskStatus()`, and `terminate()`. |
 | `validate`      | `validate(options: { pipeline: PipelineConfig \| Record<string, unknown>; source?: string }): Promise<Record<string, unknown>>`                                                                                              | `Promise<Record<string, unknown>>` | Validates a pipeline configuration without starting it. Returns validation results (e.g. errors, warnings). Use to check pipeline correctness before `use()`.                                                                                                                                                                  |
 | `terminate`     | `terminate(token: string): Promise<void>`                                                                                                                                                                                    | -                                  | Stops the pipeline for that token and frees server resources. Call when the user cancels or when you are done sending data.                                                                                                                                                                                                    |
-| `getTaskStatus` | `getTaskStatus(token: string): Promise<TASK_STATUS>`                                                                                                                                                                         | `Promise<TASK_STATUS>`             | Returns current task status: e.g. `completedCount`, `totalCount`, `completed`, `state`, `exitCode`. Use to poll until `completed` is true or to show progress.                                                                                                                                                                 |
+| `getTaskStatus` | `getTaskStatus(token: string, options?: { timeout?: number \| false }): Promise<TASK_STATUS>`                                                                                                                                | `Promise<TASK_STATUS>`             | Returns current task status: e.g. `completedCount`, `totalCount`, `completed`, `state`, `exitCode`. Use to poll until `completed` is true or to show progress.                                                                                                                                                                 |
 
 **Why `use()` returns a token:** The server runs each pipeline as a separate task. The token identifies that task so all subsequent operations (sending data, chat, status, terminate) target the right pipeline.
 
@@ -248,6 +261,7 @@ Read, write, and manage files in your account's server-side store. All paths are
 | Method     | Signature                                                     | Returns           | Description                                                                                                                                                                                                                        |
 | ---------- | ------------------------------------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fsGetUrl` | `fsGetUrl(path: string, expiresIn?: number, downloadName?: string): Promise<string>` | `Promise<string>` | Time-limited HTTP(S) URL for direct browser access. Cloud backends (S3/Azure) return a presigned/SAS URL; the local filesystem backend returns a JWT-signed `/task/fetch` URL. Served **inline** by default (use as an `<img>`/`<video>`/`<audio>` source). Pass `downloadName` to force a download with that filename via `Content-Disposition: attachment` — the only reliable way to set the download filename for cross-origin cloud URLs (where the `<a download>` attribute is ignored). `expiresIn` is in seconds (default 3600). |
+| `fsReadMany` | `fsReadMany(paths: string[]): Promise<Array<{path, ok, data?, error?}>>` | `Promise<Array>` | Batch-read many small files in ONE round trip (max 256 paths / 32 MiB total per call) — for many-small-file access patterns where per-file open/read/close is too chatty. Missing/unreadable files are per-entry results (`ok: false` + `error`), never a call failure; results come back in request order with `data` as `Uint8Array`. |
 
 **Examples:**
 
@@ -281,11 +295,81 @@ const streamUrl = await client.fsGetUrl('uploads/video.mp4', 600);
 const downloadUrl = await client.fsGetUrl('uploads/video.mp4', undefined, 'my video.mp4');
 ```
 
+
+### App publish ladder
+
+Typed wrappers over `rrext_deploy_app` — the publish ladder for RocketRide apps.
+**Deploy** copies code to the server as the next immutable registry version
+(`deploy.add`); a deployment carries the review lifecycle in its own `state`
+(`private` → `submit` → `ready` | `rejected`). **Publish** binds a deployment
+to an audience — `@me`, `@team/<name>`, or `@public` — as a pure pointer (`@user` is a legacy input alias for `@me`, never displayed);
+repointing it covers first publish, update, promote, and rollback alike.
+
+The review state lives on the **deployment**, not the binding: an app deploys
+`private` (internal-eligible), the developer `submit`s it for review, an admin
+approves (`ready`) or rejects (`rejected`). A `@public` binding may only point
+at a `ready` deployment; `@me`/`@team` bindings accept any internal-eligible
+(not `failed`) deployment. So there is no separate "publish-and-wait" — public
+listing is: submit → approve → repoint the public pointer.
+
+App ids are partitioned by the caller org's **developer id**: every app is
+`<developerId>.<name>` (globally unique), so an org can only deploy/publish
+ids inside its own namespace — the platform holds `rocketride`. Deploying or
+publishing an app requires the org to have claimed a developer id.
+
+| Method | Signature | Description |
+| ------ | --------- | ----------- |
+| `deploy.add` | `deploy.add({kind?, pipeline?, data?, metadata?, comment?, deployTo?}): Promise<PublishResult>` | The ONE rail door: deploy any kind of object as the next immutable registry version. `kind:'pipe'` (default) takes a `pipeline` dict; `kind:'app'` takes ONE `data` zip of the app's SOURCE — the server performs the build (client-produced binaries are never trusted); the zip is retained and unpacked at receipt, born deployment-state `private`. The app id must be inside your developer namespace. |
+| `listDeployments` | `listDeployments(appId): Promise<RailEntry[]>` | The version rail, newest first — the developer org sees its FULL rail (published or not), other callers only their visible versions. Each entry carries its deployment `state`, its `buildStatus` ('ok' = servable), and the `rungs` naming the audiences bound to it. |
+| `submitApp` | `submitApp(appId, registryVersion): Promise<{artifact}>` | Submit a deployed version for store review — flips the deployment `private` → `submit` (it enters the admin queue). Developer-org + namespace gated. |
+| `withdrawApp` | `withdrawApp(appId, registryVersion): Promise<{artifact}>` | Withdraw a pending review — the developer's own cancel: flips the deployment `submit` → `private` (leaves the admin queue, back to draft; history records `withdrawn`). Only a version in `submit` withdraws. Developer-org + namespace gated. |
+| `replyApp` | `replyApp(appId, message, registryVersion?): Promise<{replied, appId}>` | Append a developer message to the app's review thread — the developer half of the reviewer conversation. Rides `deployment_history` as a `reply` row (side `'developer'`), the same stream `deploy.history()` reads. Developer-org + namespace gated. |
+| `buildLog` | `buildLog(appId, registryVersion): Promise<{appId, version, log}>` | One version's durable server build log — the full phase-by-phase output the build worker stores beside the version's artifacts (no error text rides the rail rows). Long logs serve their tail; `''` = no log. Developer-org gated. |
+| `publishApp` | `publishApp(appId, registryVersion, target): Promise<{publish}>` | Bind a deployment to '@me', '@team/<name>', or '@public' ('@user' = legacy input alias). The binding is a pure pointer born 'enabled'. `@public` requires the deployment be `ready` (approved); `@me`/`@team` accept any non-`failed` deployment. Pinning ANOTHER org's public app to '@me'/'@team' is the version selector and is allowed; publishing your own app requires the id to be in your namespace. |
+| `whereApp` | `whereApp(appId): Promise<Pin[]>` | The reverse index: `{rung, handle, version, appVersion, state, deployedAt}` per audience — `state` is the bound DEPLOYMENT's review state. |
+
+Serving needs no verb: a version's bundle loads from the stable
+`/apps/<appId>/v<N>/remoteEntry.js` URL constructed from its registry
+version number, with entitlement enforced by the serve route on every
+request (registry ints ONLY — semver is display).
+
+### App marketplace + developer verbs
+
+Two raw DAP commands carry this surface (call via
+`client.call('<command>', { subcommand, ... })`):
+
+- **`rrext_deploy_app`** — the developer-account + review verbs (claiming a
+  developerId is a deploy PREREQUISITE, not a marketplace action): the
+  `developer_*` family, `submit`, and `register_dev`.
+- **`rrext_app`** — the pure marketplace: browse (`list`/`get`/`list_mine`),
+  install (`desktop_add`/`desktop_remove`), admin review (`admin_*`), and
+  pricing (`pricing_*`).
+
+Grouped families (the `developer_*`/`submit`/`register_dev` rows are on
+`rrext_deploy_app`; the rest on `rrext_app`):
+
+| Subcommand family | Subcommands | Guard | Purpose |
+| ----------------- | ----------- | ----- | ------- |
+| developer_* | `developer_register` · `developer_stripe` · `developer_dashboard` · `developer_status` | org.admin (register) | Claim the org's developer id slug + Stripe Connect onboarding. |
+| submit | `submit` · `withdraw` · `reply` | developer org + namespace | Submit a deployed version for review (flips the DEPLOYMENT `private` → `submit`), cancel a pending review, or append a developer message to the review thread (sugar over `submitApp`/`withdrawApp`/`replyApp`). |
+| register_dev | `register_dev` | self | Per-user live dev overlay (App Builder hot-reload); OSS-capable. |
+| catalog | `list` · `get` · `list_mine` · `desktop_add` · `desktop_remove` | authenticated | Browse reachable apps, the developer's own rail view, and desktop membership. |
+| admin_* | `admin_queue` · `admin_approve` · `admin_reject` · `admin_reply` · `admin_reseed` | sys.admin | Store review over the DEPLOYMENTS: the queue is deployments in `submit`; `admin_approve(appId, version)` flips it `ready`, `admin_reject(appId, version)` flips it `rejected`. |
+| pricing_* | `pricing_list` · `pricing_create` · `pricing_delete` | developer org (owns the app_products row) | Manage Stripe price tiers for a monetized app. |
+
+**Review model.** The review state lives on the DEPLOYMENT (`deployment_artifacts.state`).
+`@me`/`@team` bindings need no approval — they serve any non-`failed`
+deployment at once. Going public is a three-step flow: `submit` (deployment →
+`submit`, enters the admin queue) → `admin_approve` (→ `ready`) → `publishApp
+@public` (point the public binding at the now-`ready` version). A reject flips
+the deployment `rejected`; the developer fixes and deploys a NEW version. The
+store serves only public bindings whose deployment is `ready`.
+
 ### Events
 
 | Method      | Signature                                                       | Returns | Description                                                                                                                                                                                                                      |
 | ----------- | --------------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setEvents` | `setEvents(token: string, eventTypes: string[]): Promise<void>` | -       | Subscribes this task to the given event types (e.g. `apaevt_status_upload`, `apaevt_status_processing`). After this, those events are delivered to your `onEvent` callback. Call after `use()` and before or while sending data. |
+| `setEvents` | `setEvents(token: string, eventTypes: string[], pipeId?: number): Promise<void>` | -       | Subscribes this task (or optional pipe) to the given event types (e.g. `apaevt_status_upload`, `apaevt_status_processing`). After this, those events are delivered to your `onEvent` callback. Call after `use()` and before or while sending data. |
 
 ### Services, validation, and ping
 
@@ -392,7 +476,33 @@ Used to parse chat response content. The client does not attach an `Answer` inst
 
 ## Exceptions
 
-`AuthenticationException` extends `ConnectionException`; thrown on DAP auth failure. In persist mode the client catches it, calls `onConnectError`, and does not retry so the app can fix credentials and call `connect()` again.
+DAP-backed exceptions extend `DAPException` (`LoginAttemptCancelledError`
+extends `Error` directly, see below), which exposes `dapResult` plus two
+optional fields:
+
+- `code` — the server's machine-readable classification, absent when the failure
+  has none. Task failures carry one: `TASK_NOT_REGISTERED` (the token names no
+  live task — never started, terminated, replaced, or the engine restarted),
+  `TASK_AMBIGUOUS`, `TASK_COMPLETED`, `TASK_STOPPED`. **Classify on `code`, not
+  on `message`**, which is written for people and may be reworded.
+- `hint` — troubleshooting text the SDK attached for a developer, absent when
+  there is none. Kept out of `message` so an application can show the message
+  to an end user without the developer checklist.
+
+```ts
+try {
+	await pipe.open();
+} catch (err) {
+	if (err instanceof PipeException) {
+		if (err.code === 'TASK_NOT_REGISTERED') await restartPipeline();
+		else console.error(err.message, err.hint);
+	}
+}
+```
+
+`AuthenticationException` extends `ConnectionException`; thrown on DAP auth failure. In persist mode the client calls `onConnectError` and does not retry authentication so the app can fix credentials and call `login()` or `connect()` again.
+
+`LoginAttemptCancelledError` extends `Error` directly. Its `reason` is the `LoginAttemptCancellationReason` union `'superseded' | 'logout' | 'detached'`. Catch it when overlapping lifecycle actions are expected; transport loss and other connection failures remain `ConnectionException` instances.
 
 ---
 
@@ -437,10 +547,9 @@ const client = new RocketRideClient({
 	auth: apiKey,
 	uri: serverUri,
 	persist: true,
-	maxRetryTime: 300000,
 	onConnected: async () => updateUI({ state: 'connected' }),
 	onDisconnected: async (reason, hasError) => updateUI({ state: 'disconnected', reason, hasError }),
-	onConnectError: (msg) => updateUI({ state: 'error', message: msg }),
+	onConnectError: (error) => updateUI({ state: 'error', message: error.message }),
 	onEvent: async (e) => {
 		if (e.event === 'apaevt_status_upload') updateProgress(e.body);
 	},
@@ -546,7 +655,7 @@ await client.disconnect();
 
 - [Documentation](https://docs.rocketride.org/)
 - [GitHub](https://github.com/rocketride-org/rocketride-server)
-- [Discord](https://discord.gg/9hr3tdZmEG)
+- [Discord](https://discord.gg/PMXrtenMsY)
 - [Contributing](https://github.com/rocketride-org/rocketride-server/blob/develop/CONTRIBUTING.md)
 
 ## License

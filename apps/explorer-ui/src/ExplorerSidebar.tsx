@@ -25,10 +25,12 @@
 // =============================================================================
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ShellSidebarProps } from 'shell-ui';
-import { useShellConnection } from 'shell-ui';
-import { Explorer, BxDownload, BxDockLeft } from 'shared';
-import type { ExplorerEntry, ExplorerConfig, ExplorerFileAction, IVirtualFileSystem } from 'shared';
+import type { CSSProperties } from 'react';
+import { useShellConnection } from 'shell';
+import { Explorer } from 'shell';
+import { BxDownload, BxDockLeft, SidebarCollapsedGate } from 'shell';
+import type { ExplorerEntry, ExplorerConfig, ExplorerFileAction } from 'shell';
+import type { IVirtualFileSystem, RocketRideClient } from 'shell';
 import { getDocs } from './docs';
 import { getMediaInfo } from './mediaTypes';
 import { getCompatibleViewers, VIEWER_LABELS } from './viewerRegistry';
@@ -45,6 +47,35 @@ const EXPLORER_CONFIG: ExplorerConfig = {
 	allowFolders: true,
 };
 
+/**
+ * No-op VFS for the file Explorer.
+ *
+ * The Explorer sidebar performs all file operations through the onFileManage /
+ * onMove / onUpload callbacks (which call the RocketRide client directly), so
+ * this stub satisfies the Explorer contract without exposing raw VFS access.
+ */
+const NOOP_VFS: IVirtualFileSystem = {
+	list: async () => [],
+	read: async () => null,
+	write: async () => {},
+	rename: async () => {},
+	delete: async () => {},
+	mkdir: async () => {},
+};
+
+// =============================================================================
+// STYLES
+// =============================================================================
+
+const styles = {
+	/** Sidebar content wrapper — fills the shell frame's scrolling slot. */
+	sidebar: {
+		display: 'flex',
+		flexDirection: 'column',
+		height: '100%',
+	} as CSSProperties,
+};
+
 // =============================================================================
 // COMPONENT
 // =============================================================================
@@ -52,11 +83,12 @@ const EXPLORER_CONFIG: ExplorerConfig = {
 /**
  * Sidebar for the File Explorer app.
  *
- * Uses the shared Explorer component for the file tree with built-in
- * rename, delete, create file, and create folder support.  Files are
- * opened in the Documents tab system on click.
+ * The app's AppLayout sidebar node: builds the file-tree Explorer and renders
+ * it behind a SidebarCollapsedGate (this free-form content has no icon-rail
+ * form). ExplorerApp passes this component as its root layout's `sidebar`
+ * prop. Files open in the Documents tab system on click.
  */
-const ExplorerSidebar: React.FC<ShellSidebarProps> = ({ collapsed }) => {
+const ExplorerSidebar: React.FC = () => {
 	const { client, isConnected } = useShellConnection();
 	const [entries, setEntries] = useState<ExplorerEntry[]>([]);
 
@@ -81,7 +113,7 @@ const ExplorerSidebar: React.FC<ShellSidebarProps> = ({ collapsed }) => {
 	const refresh = useCallback(async () => {
 		if (!client || !isConnected) { setEntries([]); return; }
 		try {
-			const allEntries = await listRecursive(client, '');
+			const allEntries = await listRecursive(client, '@');
 			setEntries(allEntries);
 		} catch {
 			setEntries([]);
@@ -160,7 +192,10 @@ const ExplorerSidebar: React.FC<ShellSidebarProps> = ({ collapsed }) => {
 		if (!client) return;
 		try {
 			const name = sourcePath.includes('/') ? sourcePath.substring(sourcePath.lastIndexOf('/') + 1) : sourcePath;
-			const newPath = targetDir ? `${targetDir}/${name}` : name;
+			// The tree is rooted at the '@' mount (listRecursive above), so an
+			// empty targetDir IS that root — carry '@' through instead of
+			// letting a bare name silently target the plain user store.
+			const newPath = `${targetDir || '@'}/${name}`;
 			if (newPath === sourcePath) return;
 			await client.fsRename(sourcePath, newPath);
 			// Keep open editor tabs in sync with the move.  A moved file must
@@ -195,7 +230,8 @@ const ExplorerSidebar: React.FC<ShellSidebarProps> = ({ collapsed }) => {
 		if (!client) return;
 		try {
 			for (const file of files) {
-				const path = targetDir ? `${targetDir}/${file.name}` : file.name;
+				// Same root rule as handleMove: '' targetDir is the '@' mount.
+				const path = `${targetDir || '@'}/${file.name}`;
 				const { handle } = await client.fsOpen(path, 'w');
 				const chunkSize = 4 * 1024 * 1024; // 4 MB
 				try {
@@ -281,28 +317,15 @@ const ExplorerSidebar: React.FC<ShellSidebarProps> = ({ collapsed }) => {
 		{ id: 'download', label: 'Download', icon: <BxDownload size={16} />, onSelect: handleDownload },
 	], [buildOpenWithChildren, handleDownload]);
 
-	// --- Collapsed mode -------------------------------------------------------
+	// --- Register sidebar content ---------------------------------------------
 
-	if (collapsed) {
-		return null;
-	}
-
-	// --- Expanded mode --------------------------------------------------------
-
-	// Use a no-op VFS for the Explorer — we handle all operations via callbacks
-	const noopVfs: IVirtualFileSystem = {
-		list: async () => [],
-		read: async () => null,
-		write: async () => {},
-		rename: async () => {},
-		delete: async () => {},
-		mkdir: async () => {},
-	};
-
-	return (
-		<div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+	// Build the file-tree node and publish it to the shell sidebar's scrolling
+	// slot. The shell frame owns the collapse behaviour and hides free-form
+	// content while collapsed, so no collapsed icon rail is drawn here.
+	const content = (
+		<div style={styles.sidebar}>
 			<Explorer
-				vfs={noopVfs}
+				vfs={NOOP_VFS}
 				config={EXPLORER_CONFIG}
 				entries={entries}
 				isConnected={isConnected}
@@ -316,6 +339,10 @@ const ExplorerSidebar: React.FC<ShellSidebarProps> = ({ collapsed }) => {
 			/>
 		</div>
 	);
+
+	// Render behind the collapse gate — this free-form content has no
+	// icon-rail form, so it hides while the sidebar is collapsed.
+	return <SidebarCollapsedGate>{content}</SidebarCollapsedGate>;
 };
 
 // =============================================================================
@@ -328,7 +355,7 @@ const ExplorerSidebar: React.FC<ShellSidebarProps> = ({ collapsed }) => {
  * can derive its tree hierarchy from.
  */
 async function listRecursive(
-	client: any,
+	client: RocketRideClient,
 	dir: string,
 ): Promise<ExplorerEntry[]> {
 	const result = await client.fsListDir(dir);

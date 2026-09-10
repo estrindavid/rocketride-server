@@ -26,7 +26,7 @@ The method returns a **token** that you use for all subsequent operations on tha
 
 ```python
 result = await client.use(
-    filepath="pipeline.json",   # or pipeline={...}
+    filepath='pipeline.json',  # or pipeline={...}
     token=None,
     source=None,
     threads=None,
@@ -61,7 +61,7 @@ const result = await client.use({
 | `token` | `str` / `string` | No | Custom task token (server generates one if not provided) |
 | `source` | `str` / `string` | No | Override the source component specified in the pipeline config |
 | `threads` | `int` / `number` | No | Number of processing threads (server decides default) |
-| `use_existing` / `useExisting` | `bool` / `boolean` | No | Reuse an existing pipeline with the same token |
+| `use_existing` / `useExisting` | `bool` / `boolean` | No | Reuse an existing pipeline with the same token. The submitted pipeline is **not** applied to an instance that is already running — see `reused` below |
 | `args` | `list[str]` / `string[]` | No | Command-line style arguments to pass to the pipeline |
 | `ttl` | `int` / `number` | No | Time-to-live in seconds for idle pipelines (0 = no timeout) |
 | `pipelineTraceLevel` | `str` / `string` | No | Trace level: `'none'`, `'metadata'`, `'summary'`, or `'full'` |
@@ -72,6 +72,8 @@ const result = await client.use({
 - **Description**: Object containing the task `token` and other pipeline startup metadata
 
 The returned `token` is required for all subsequent operations: sending data, checking status, and terminating the pipeline.
+
+`reused` is `true` when `useExisting` returned an instance that was already running rather than starting the pipeline you submitted. In that case the running instance keeps the configuration it was created with, and the pipeline in this call is ignored — including any edits since. It also keeps whatever state that instance has accumulated. Check this flag before treating a result as a run of the configuration you just sent; benchmarks and A/B comparisons are where an unnoticed reuse is most costly. Call `restart()` to apply new configuration to a live token.
 
 ## **Usage Examples**
 
@@ -133,10 +135,13 @@ config = {
     'source': 'webhook_1',
     'components': [
         {'id': 'webhook_1', 'provider': 'webhook', 'config': {}},
-        {'id': 'llm_1', 'provider': 'llm_openai', 'config': {'model': 'gpt-4'},
-         'input': [{'from': 'webhook_1', 'lane': 'output'}]},
-        {'id': 'response_1', 'provider': 'response', 'config': {},
-         'input': [{'from': 'llm_1', 'lane': 'answer'}]},
+        {
+            'id': 'llm_1',
+            'provider': 'llm_openai',
+            'config': {'model': 'gpt-4'},
+            'input': [{'from': 'webhook_1', 'lane': 'output'}],
+        },
+        {'id': 'response_1', 'provider': 'response', 'config': {}, 'input': [{'from': 'llm_1', 'lane': 'answer'}]},
     ],
 }
 result = await client.use(pipeline=config)

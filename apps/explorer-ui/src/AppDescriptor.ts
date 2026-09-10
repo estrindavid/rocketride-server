@@ -24,16 +24,20 @@
 // APP DESCRIPTOR — explorer-ui MF remote entry point (File Explorer)
 // =============================================================================
 
-import type { AppDescriptor } from 'shell-ui';
+// HMR anchor: keeps the shared jsx runtime referenced even when the app's
+// root component fails to compile — an error build otherwise orphans it, the
+// hot runtime tombstones its factory, and every later fix-apply dies
+// silently (the frozen-preview bug).
+import 'react/jsx-dev-runtime';
+
+import type { AppDescriptor } from 'shell';
 import ExplorerApp from './ExplorerApp';
-import ExplorerSidebar from './ExplorerSidebar';
 
 /**
  * AppDescriptor for the File Explorer application.
  *
  * Browse, view, and edit files stored on the RocketRide server.
  * Multi-tab + split-pane support via Documents library.
- * Sidebar with file tree; status bar enabled in manifest.
  * Requires authentication (authenticated: true in manifest).
  */
 const EXPLORER_APP: AppDescriptor = {
@@ -42,10 +46,9 @@ const EXPLORER_APP: AppDescriptor = {
 	branding: {
 		appName: 'File Explorer',
 	},
-	components: {
-		App: ExplorerApp,
-		Sidebar: ExplorerSidebar,
-	},
+	// Two-column app: ExplorerApp's root AppLayout declares the file-tree
+	// Explorer sidebar and the status bar.
+	app: ExplorerApp,
 };
 
 export default EXPLORER_APP;

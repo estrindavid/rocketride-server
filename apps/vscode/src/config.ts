@@ -38,23 +38,25 @@ export interface ConnectionGroupConfig {
 	/** Connection mode (null only valid for deployment = shared with dev) */
 	connectionMode: ConnectionMode | null;
 
-	/** Server host URL */
+	/** Server host URL. In cloud mode this is the RESOLVED target (the
+	 * custom server when opted in, else the default cloud) — consumers
+	 * never re-derive it. */
 	hostUrl: string;
+
+	/** Cloud mode: connect to `cloudUrl` instead of the default cloud. */
+	useCustomServer: boolean;
+
+	/** Cloud mode: the custom server address (raw setting value, for the
+	 * Settings UI — `hostUrl` carries the resolved target). */
+	cloudUrl: string;
 
 	/** API key for authentication (from secure storage) */
 	apiKey: string;
-
-	/** Cloud team ID */
-	teamId: string;
 
 	/** Local engine configuration */
 	local: {
 		/** Engine version: 'latest', 'prerelease', or a specific tag */
 		engineVersion: string;
-		/** Enable full debug output (--trace=debugOut) */
-		debugOutput: boolean;
-		/** Additional engine arguments (passed to engine subprocess) */
-		engineArgs: string;
 	};
 }
 
@@ -72,6 +74,18 @@ export interface ConfigManagerInfo {
 	/** Pipeline restart behavior when .pipe files change */
 	pipelineRestartBehavior: 'auto' | 'manual' | 'prompt';
 
+	/** Default idle-timeout (seconds) for runs without a per-pipeline override; 0 = no timeout. */
+	pipelineTtl: number;
+
+	/** Default trace verbosity for runs without a per-pipeline override. */
+	pipelineTraceLevel: 'none' | 'metadata' | 'summary' | 'full';
+
+	/** Additional command-line arguments passed to each pipeline task via `.use`. */
+	taskArguments: string;
+
+	/** Enable full debug output for pipeline tasks (--trace=debugOut via `.use` args). */
+	pipelineDebugOutput: boolean;
+
 	/** Voice Builder settings and provider credentials. */
 	voiceBuilder: VoiceBuilderConfig;
 }
@@ -80,12 +94,11 @@ export interface ConfigManagerInfo {
 export interface ConnectionGroupSnapshot {
 	connectionMode: ConnectionMode | null;
 	hostUrl: string;
+	useCustomServer: boolean;
+	cloudUrl: string;
 	apiKey: string;
-	teamId: string;
 	local: {
 		engineVersion: string;
-		debugOutput: boolean;
-		engineArgs: string;
 	};
 }
 
@@ -99,6 +112,10 @@ export interface SettingsSnapshot {
 	deployment: ConnectionGroupSnapshot;
 	defaultPipelinePath: string;
 	pipelineRestartBehavior: 'auto' | 'manual' | 'prompt';
+	pipelineTtl: number;
+	pipelineTraceLevel: 'none' | 'metadata' | 'summary' | 'full';
+	taskArguments: string;
+	pipelineDebugOutput: boolean;
 	voiceBuilder: VoiceBuilderSnapshot;
 	autoAgentIntegration: boolean;
 	integrationCopilot: boolean;
@@ -137,9 +154,10 @@ export class ConfigManager {
 	private static readonly DEFAULT_GROUP: ConnectionGroupConfig = {
 		connectionMode: 'local',
 		hostUrl: '',
+		useCustomServer: false,
+		cloudUrl: '',
 		apiKey: '',
-		teamId: '',
-		local: { engineVersion: 'latest', debugOutput: false, engineArgs: '' },
+		local: { engineVersion: 'latest' },
 	};
 
 	private static readonly DEFAULT_VOICE_BUILDER: VoiceBuilderConfig = {
@@ -155,6 +173,10 @@ export class ConfigManager {
 		deployment: { ...ConfigManager.DEFAULT_GROUP, connectionMode: null },
 		defaultPipelinePath: '',
 		pipelineRestartBehavior: 'prompt',
+		pipelineTtl: 900,
+		pipelineTraceLevel: 'full',
+		taskArguments: '',
+		pipelineDebugOutput: false,
 		voiceBuilder: { ...ConfigManager.DEFAULT_VOICE_BUILDER },
 	};
 
@@ -209,7 +231,8 @@ export class ConfigManager {
 	 * Refreshes a single group's config from VS Code settings + secure storage.
 	 * Applies identical fallback logic for both groups:
 	 *   - docker/service → localhost + default API key
-	 *   - cloud → build-time ROCKETRIDE_URI fallback
+	 *   - cloud → the cloudUrl setting's DEFAULT, or the custom server when
+	 *     the user opted in via useCustomServer
 	 */
 	private async refreshGroupConfig(group: ConnectionGroup): Promise<ConnectionGroupConfig> {
 		const gc = vscode.workspace.getConfiguration(`${this.configSection}.${group}`);
@@ -217,26 +240,32 @@ export class ConfigManager {
 		const connectionMode = gc.get<ConnectionMode | null>('connectionMode', defaultMode);
 		let hostUrl = gc.get<string>('hostUrl', '');
 		let apiKey = await this.getApiKeyFromStorage(group);
+		const useCustomServer = gc.get<boolean>('useCustomServer', false);
+		const cloudUrl = gc.get<string>('cloudUrl', '');
 
-		// Cloud: build-time URI — ignore any stale hostUrl from other modes
+		// Cloud: resolve the target from SETTINGS — nothing is baked into the
+		// extension. Unchecked = the cloudUrl setting's package.json default
+		// (the production cloud), so an edited-but-unchecked value or a stale
+		// hostUrl from another mode can never leak in; checked = the user's
+		// explicit custom server (staging, localhost, a preview env).
 		if (connectionMode === 'cloud') {
-			hostUrl = process.env.ROCKETRIDE_URI || 'https://api.rocketride.ai';
+			const defaultCloudUrl = gc.inspect<string>('cloudUrl')?.defaultValue ?? cloudUrl;
+			hostUrl = useCustomServer && cloudUrl ? cloudUrl : defaultCloudUrl;
 		}
 
 		return {
 			connectionMode,
 			hostUrl,
+			useCustomServer,
+			cloudUrl,
 			apiKey,
-			teamId: gc.get<string>('teamId', ''),
 			local: {
 				engineVersion: gc.get<string>('local.engineVersion', 'latest'),
-				debugOutput: gc.get<boolean>('local.debugOutput', false),
-				engineArgs: gc.get<string>('local.engineArgs', ''),
 			},
 		};
 	}
 
-/**
+	/**
 	 * Refreshes the cached configuration from all sources (VS Code settings
 	 * and secure storage). Public so that callers like applyAllSettings() and
 	 * EngineRegistry can force a cache refresh after external writes.
@@ -249,6 +278,10 @@ export class ConfigManager {
 			deployment: await this.refreshGroupConfig('deployment'),
 			defaultPipelinePath: config.get('defaultPipelinePath', 'pipelines'),
 			pipelineRestartBehavior: config.get('pipelineRestartBehavior', 'prompt'),
+			pipelineTtl: config.get('pipelineTTL', 900),
+			pipelineTraceLevel: config.get('pipelineTraceLevel', 'full'),
+			taskArguments: config.get('taskArguments', ''),
+			pipelineDebugOutput: config.get('pipelineDebugOutput', false),
 			voiceBuilder: await this.refreshVoiceBuilderConfig(),
 		};
 	}
@@ -295,6 +328,10 @@ export class ConfigManager {
 			deployment: { ...this.config.deployment, local: { ...this.config.deployment.local } },
 			defaultPipelinePath: this.config.defaultPipelinePath,
 			pipelineRestartBehavior: this.config.pipelineRestartBehavior,
+			pipelineTtl: this.config.pipelineTtl,
+			pipelineTraceLevel: this.config.pipelineTraceLevel,
+			taskArguments: this.config.taskArguments,
+			pipelineDebugOutput: this.config.pipelineDebugOutput,
 			voiceBuilder: { ...this.config.voiceBuilder },
 		};
 	}
@@ -337,29 +374,47 @@ export class ConfigManager {
 	}
 
 	/**
-	 * Returns the engine args as an array for the given group, injecting
-	 * --trace=debugOut if debug output is enabled and the user hasn't
-	 * specified their own --trace.
+	 * Returns the per-task arguments passed to `.use` when executing a pipe,
+	 * injecting --trace=debugOut if pipeline debug output is enabled and the
+	 * user hasn't specified their own --trace.
 	 *
-	 * Note: engineArgs is passed as a single string intentionally. The backend
-	 * engine splits all arguments according to shell parsing rules (handling
-	 * quoted paths, escaped spaces, etc.). Naive whitespace splitting here
-	 * would break arguments like --path='C:\Program Files\RocketRide'.
+	 * Note: taskArguments is passed as a single string intentionally. The
+	 * backend engine splits all arguments according to shell parsing rules
+	 * (handling quoted paths, escaped spaces, etc.). Naive whitespace splitting
+	 * here would break arguments like --path='C:\Program Files\RocketRide'.
 	 */
-	public getEngineArgs(group: ConnectionGroup = 'development'): string[] {
-		const gc = this.getConfig()[group];
-		const rawArgs = gc.local.engineArgs;
-		const argsStr = Array.isArray(rawArgs) ? rawArgs.join(' ') : String(rawArgs || '');
+	public getTaskArgs(): string[] {
+		const cfg = this.getConfig();
+		const argsStr = String(cfg.taskArguments || '');
 		const hasTrace = argsStr.includes('--trace=');
 
 		const result: string[] = [];
 		if (argsStr.trim()) {
 			result.push(argsStr.trim());
 		}
-		if (gc.local.debugOutput && !hasTrace) {
+		if (cfg.pipelineDebugOutput && !hasTrace) {
 			result.push('--trace=debugOut');
 		}
 		return result;
+	}
+
+	/**
+	 * The cloud server the extension currently operates against (SYNC).
+	 *
+	 * Sign-in (the OAuth code exchange) and other group-less cloud actions
+	 * need ONE answer: the resolved hostUrl of whichever group is in cloud
+	 * mode — development preferred (it is the interactive session),
+	 * deployment otherwise. When no group is in cloud mode, the deployment
+	 * cloudUrl setting's DEFAULT (nothing is baked into the extension).
+	 *
+	 * @returns The resolved cloud server URL.
+	 */
+	public getEffectiveCloudUrl(): string {
+		const cfg = this.getConfig();
+		if (cfg.development.connectionMode === 'cloud') return cfg.development.hostUrl;
+		if (cfg.deployment.connectionMode === 'cloud') return cfg.deployment.hostUrl;
+		const gc = vscode.workspace.getConfiguration(`${this.configSection}.deployment`);
+		return gc.inspect<string>('cloudUrl')?.defaultValue ?? gc.get<string>('cloudUrl', '');
 	}
 
 	/**
@@ -482,22 +537,26 @@ export class ConfigManager {
 			// --- Development group ---
 			await wc.update('development.connectionMode', s.development.connectionMode, vscode.ConfigurationTarget.Global);
 			await wc.update('development.hostUrl', s.development.hostUrl, vscode.ConfigurationTarget.Global);
-			await wc.update('development.teamId', s.development.teamId, vscode.ConfigurationTarget.Global);
+			await wc.update('development.useCustomServer', s.development.useCustomServer, vscode.ConfigurationTarget.Global);
+			await wc.update('development.cloudUrl', s.development.cloudUrl, vscode.ConfigurationTarget.Global);
 			await wc.update('development.local.engineVersion', s.development.local.engineVersion, vscode.ConfigurationTarget.Global);
-			await wc.update('development.local.debugOutput', s.development.local.debugOutput, vscode.ConfigurationTarget.Global);
-			await wc.update('development.local.engineArgs', s.development.local.engineArgs, vscode.ConfigurationTarget.Global);
 
 			// --- Deployment group ---
 			await wc.update('deployment.connectionMode', s.deployment.connectionMode, vscode.ConfigurationTarget.Global);
 			await wc.update('deployment.hostUrl', s.deployment.hostUrl, vscode.ConfigurationTarget.Global);
-			await wc.update('deployment.teamId', s.deployment.teamId, vscode.ConfigurationTarget.Global);
+			await wc.update('deployment.useCustomServer', s.deployment.useCustomServer, vscode.ConfigurationTarget.Global);
+			await wc.update('deployment.cloudUrl', s.deployment.cloudUrl, vscode.ConfigurationTarget.Global);
 			await wc.update('deployment.local.engineVersion', s.deployment.local.engineVersion, vscode.ConfigurationTarget.Global);
-			await wc.update('deployment.local.debugOutput', s.deployment.local.debugOutput, vscode.ConfigurationTarget.Global);
-			await wc.update('deployment.local.engineArgs', s.deployment.local.engineArgs, vscode.ConfigurationTarget.Global);
 
 			// --- Global settings ---
 			await wc.update('defaultPipelinePath', s.defaultPipelinePath, vscode.ConfigurationTarget.Global);
 			await wc.update('pipelineRestartBehavior', s.pipelineRestartBehavior, vscode.ConfigurationTarget.Global);
+
+			// --- Pipeline execution defaults ---
+			await wc.update('pipelineTTL', s.pipelineTtl, vscode.ConfigurationTarget.Global);
+			await wc.update('pipelineTraceLevel', s.pipelineTraceLevel, vscode.ConfigurationTarget.Global);
+			await wc.update('taskArguments', s.taskArguments, vscode.ConfigurationTarget.Global);
+			await wc.update('pipelineDebugOutput', s.pipelineDebugOutput, vscode.ConfigurationTarget.Global);
 
 			// --- Voice Builder settings ---
 			await wc.update('voiceBuilder.enabled', s.voiceBuilder.enabled, vscode.ConfigurationTarget.Global);
@@ -552,22 +611,6 @@ export class ConfigManager {
 	public async updateConnectionMode(group: ConnectionGroup, connectionMode: ConnectionMode | null): Promise<void> {
 		const config = vscode.workspace.getConfiguration(this.configSection);
 		await config.update(`${group}.connectionMode`, connectionMode, vscode.ConfigurationTarget.Global);
-	}
-
-	/**
-	 * Sets the team ID in cache only for a group (runtime, not persisted).
-	 * Use when the sidebar changes the team at runtime.
-	 */
-	public setTeamId(group: ConnectionGroup, teamId: string): void {
-		this.config[group].teamId = teamId;
-	}
-
-	/**
-	 * Updates the team ID for a group (ASYNC - updates both cache and storage).
-	 */
-	public async updateTeamId(group: ConnectionGroup, teamId: string): Promise<void> {
-		const config = vscode.workspace.getConfiguration(this.configSection);
-		await config.update(`${group}.teamId`, teamId, vscode.ConfigurationTarget.Global);
 	}
 
 	/**

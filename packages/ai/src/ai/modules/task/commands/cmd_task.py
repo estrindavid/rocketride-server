@@ -54,7 +54,7 @@ import os
 from typing import TYPE_CHECKING, Dict, Any
 from ai.common.dap import DAPConn, TransportBase
 from ai.account import account
-from ai.account.models import resolve_task_permissions
+from ai.account.models import resolve_run_permissions
 from rocketride import TASK_STATE
 
 # Only import for type checking to avoid circular import errors
@@ -125,27 +125,37 @@ class TaskCommands(DAPConn):
             Exception: If task creation or execution startup fails
         """
         try:
-            # Verify permission
-            self.verify_permission('task.control')
+            # The run team is ALWAYS the session's DEV TEAM: the team a
+            # development-mode run is billed to and whose environment layer
+            # applies — the user's profile-assigned team for client
+            # connections, or the deployment's team for the trusted
+            # in-process dispatch (which synthesizes an AccountInfo with
+            # devTeam = the run's team). A client-supplied teamId is
+            # IGNORED, never honored — the caller must not be able to pick
+            # the team a run is billed/authorized/secret-resolved under
+            # (same doctrine as the org IDOR fixes).
+            args = request.get('arguments') or {}
+            team_id = self._account_info.devTeam
+            # Billing must never guess: no dev team = no dev run.
+            if not team_id:
+                raise PermissionError('No development team is set — pick one in your profile before running pipelines')
+
+            # Verify task.control on the run team BEFORE any secret handling,
+            # since the env merge below pulls that team's secrets.
+            self.verify_team_permission(team_id, 'task.control')
 
             # Verify required pipeline plans
-            args = request.get('arguments') or {}
             pipeline = args.get('pipeline')
             if pipeline is not None:
                 # Check that the pipeline's required plan is available for this account.
                 self.verify_plans(self._account_info, pipeline)
 
-            # Use client-supplied teamId if present, otherwise fall back to defaultTeam.
-            team_id = args.get('teamId') or self._account_info.defaultTeam
-
-            # Resolve org_id from the user's single organization.
-            org_id = ''
-            org = self._account_info.organization
-            if org:
-                for team in org.get('teams', []):
-                    if team.get('id') == team_id:
-                        org_id = org.get('id', '')
-                        break
+            # Resolve the org that owns the TARGET team (same resolution as
+            # on_launch): members via their own org, sys.admin/internal via
+            # the account backend — the task file must never carry an empty
+            # orgId as trusted identity, and the secret merge below must pull
+            # the TARGET team's real org layer.
+            org_id = await self.resolve_org_for_team(team_id)
 
             # Build merged environment for pipeline variable resolution.
             # Combines .env → org → team → user secrets (SaaS) or just .env (OSS).
@@ -161,10 +171,26 @@ class TaskCommands(DAPConn):
             else:
                 merged_env = {}
 
-            # Layer org → team → user secrets on top
+            # Run classification comes ONLY from the trusted in-process
+            # dispatch (start_server_task_as_team sets these attributes on
+            # its connection) — never from DAP arguments, so remote clients
+            # cannot spoof a deploy run into the team continuum.
+            run_kind = getattr(self, '_trusted_run_kind', 'dev')
+            trigger = getattr(self, '_trusted_trigger', '') or ''
+            # Owner scope rides the same trusted channel: a TEAM-owned deploy
+            # (@team) or a USER-owned run (an interactive .use, or a personal
+            # @me deploy). Defaults from run_kind when the dispatch didn't set
+            # it (an ordinary .use is user-owned).
+            owner_kind = getattr(self, '_trusted_owner_kind', '') or ('team' if run_kind == 'deploy' else 'user')
+
+            # Layer org → team → user secrets on top. A TEAM-owned run skips the
+            # USER layer deliberately (a @team deployment's config must not
+            # depend on which human deployed it); a USER-owned run — an
+            # interactive .use OR a personal @me deploy — applies its owner's
+            # user layer.
             merged_env.update(
                 await account.get_merged_env(
-                    user_id=self._account_info.userId,
+                    user_id='' if owner_kind == 'team' else self._account_info.userId,
                     org_id=org_id,
                     team_id=team_id,
                 )
@@ -182,6 +208,9 @@ class TaskCommands(DAPConn):
                 team_id=team_id,
                 org_id=org_id,
                 env=merged_env,
+                run_kind=run_kind,
+                owner_kind=owner_kind,
+                trigger=trigger,
             )
 
             # Confirm successful task execution startup
@@ -210,8 +239,12 @@ class TaskCommands(DAPConn):
             Exception: If task creation or execution startup fails
         """
         try:
-            # Verify permission
-            self.verify_permission('task.control')
+            # Authorize against the TASK'S team, not the dev team: get_task
+            # resolves the token to its control entry and requires
+            # task.control on that team (sys.admin bypasses). A dev-team
+            # check alone let any task.control holder restart other teams'
+            # token-addressed tasks.
+            self.get_task(request, 'task.control')
 
             # Start the task without debugger attachment
             response = await self._server.restart_task(
@@ -321,6 +354,11 @@ class TaskCommands(DAPConn):
                 - args (Dict[str, Any]): Additional arguments for the request
                     - projectId (str)): The project id
                     - source (str): The source id
+                    - teamId (str, optional): Address the team's DEPLOY run;
+                      absent addresses the caller's own run
+                    - runKind (str, optional): Teamless continuum selector —
+                      absent/'dev' = the caller's dev run, 'deploy' = the
+                      caller's personal @me deploy run
 
         Returns:
             Dict[str, Any]: DAP response with token
@@ -329,17 +367,24 @@ class TaskCommands(DAPConn):
             Exception: If task does not exist
         """
         try:
-            # Verify permission
-            self.verify_permission('task.monitor')
-
             # Get the arguments
             args = request.get('arguments', {})
             project_id = args.get('projectId', None)
             source = args.get('source', None)
+            team_id = args.get('teamId') or ''
+            run_kind = args.get('runKind') or ''
 
-            # Get the task control (ownership + permission check inside)
+            # Verify permission against the requested scope: the named team
+            # for a deploy lookup, the caller's default context otherwise
+            # (prior art: cmd_log._verify_log_access).
+            if team_id:
+                self.verify_team_permission(team_id, 'task.monitor')
+            else:
+                self.verify_permission('task.monitor')
+
+            # Get the task control (owner scoping + permission check inside)
             control = self._server.get_task_control_by_project(
-                project_id, source, self._account_info, require='task.monitor'
+                project_id, source, self._account_info, require='task.monitor', team_id=team_id, run_kind=run_kind
             )
 
             # Return successful response with status data
@@ -373,14 +418,18 @@ class TaskCommands(DAPConn):
                     - pipeline: Full pipeline configuration dict
         """
         try:
-            # Require monitor permission to list tasks
-            self.verify_permission('task.monitor')
-
             tasks = []
 
-            # Iterate all tasks the caller has access to (own, teammate, or org admin).
+            # Iterate all tasks the caller may see: user-owned runs (dev and
+            # @me deploys) are OWNER-ONLY — the caller's own runs stay
+            # visible across an org switch (identity, not team, is the key)
+            # and a teammate's personal runs never appear; team-owned deploy
+            # runs list for anyone with permissions on the run's team.
+            # Authorization is PER RUN — a global verify_permission here
+            # would evaluate the caller's current dev-team context and hide
+            # their own private runs after an org or dev-team switch.
             for control in self._server._task_control.values():
-                if not resolve_task_permissions(self._account_info, control.teamId):
+                if 'task.monitor' not in resolve_run_permissions(self._account_info, control):
                     continue
 
                 # Get current status for name and status string
@@ -409,6 +458,19 @@ class TaskCommands(DAPConn):
                             'source': control.source,
                             'token': control.token,
                             'status': status.status,
+                            # Owning team — lets clients attribute a task to a
+                            # TEAM deployment vs a dev run of the same project.
+                            'teamId': control.teamId,
+                            # Run classification straight from the control —
+                            # clients must not infer deploy-ness from teamId
+                            # (dev runs carry an attribution team too).
+                            'runKind': control.run_kind,
+                            # Trusted owner scope: a personal (@me) deploy's
+                            # teamId is only billing attribution — clients
+                            # match personal deployments by ownerKind='user'
+                            # + ownerId, never by the billing team.
+                            'ownerKind': control.owner_kind or ('team' if control.run_kind == 'deploy' else 'user'),
+                            'ownerId': control.owner_id,
                             'pipeline': control.pipeline,
                         }
                     )

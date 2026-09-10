@@ -17,7 +17,7 @@ title: "MCP Server"
 <p align="center">
   <a href="https://pypi.org/project/rocketride-mcp/"><img src="https://img.shields.io/pypi/v/rocketride-mcp?color=222223&label=PyPI" alt="PyPI" /></a>
   <a href="https://github.com/rocketride-org/rocketride-server"><img src="https://img.shields.io/github/stars/rocketride-org/rocketride-server?style=flat&color=238636&label=GitHub&logo=github&logoColor=white" alt="GitHub" /></a>
-  <a href="https://discord.gg/9hr3tdZmEG"><img src="https://img.shields.io/badge/Discord-Join-370b7a?logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://discord.gg/PMXrtenMsY"><img src="https://img.shields.io/badge/Discord-Join-370b7a?logo=discord&logoColor=white" alt="Discord" /></a>
   <a href="https://github.com/rocketride-org/rocketride-server/blob/develop/LICENSE"><img src="https://img.shields.io/badge/License-MIT-41b6e6" alt="MIT License" /></a>
 </p>
 
@@ -55,7 +55,7 @@ Running pipelines are discovered automatically - start a pipeline in VS Code or 
 It lets you build, debug, and deploy production AI workflows without leaving your IDE --
 using a visual drag-and-drop canvas or code-first with TypeScript and Python SDKs.
 
-- **50+ ready-to-use nodes** - 13 LLM providers, 8 vector databases, OCR, NER, PII anonymization, and more
+- **100+ ready-to-use nodes** - 15+ LLM providers, 9 vector databases, OCR, NER, PII anonymization, and more
 - **High-performance C++ engine** - production-grade speed and reliability
 - **Deploy anywhere** - locally, on-premises, or self-hosted with Docker
 - **MIT licensed** - fully open-source, OSI-compliant
@@ -233,15 +233,15 @@ In Claude Desktop or any MCP-compatible client, resources are listed automatical
 
 ```python
 # Example: read the pipeline list resource
-result = await session.read_resource("rocketride://pipelines")
+result = await session.read_resource('rocketride://pipelines')
 # Returns: {"pipelines": [{"name": "my-pipeline", "description": "..."}, ...]}
 
 # Example: check server status
-result = await session.read_resource("rocketride://status")
+result = await session.read_resource('rocketride://status')
 # Returns: {"connected": true, "pipeline_count": 3, "pipelines": ["pipe-a", "pipe-b", "pipe-c"]}
 
 # Example: list available node types
-result = await session.read_resource("rocketride://nodes")
+result = await session.read_resource('rocketride://nodes')
 # Returns: {"nodes": [{"name": "llm_openai", "type": "processor"}, ...]}
 ```
 
@@ -310,10 +310,9 @@ This generates the message: _"Evaluate the output quality of the RocketRide pipe
 prompts = await session.list_prompts()
 
 # Get a rendered prompt
-result = await session.get_prompt("analyze-document", arguments={
-    "pipeline": "my-pipeline",
-    "query": "Summarize the key findings"
-})
+result = await session.get_prompt(
+    'analyze-document', arguments={'pipeline': 'my-pipeline', 'query': 'Summarize the key findings'}
+)
 # result.messages[0].content.text contains the rendered message
 ```
 
@@ -341,11 +340,33 @@ Set these environment variables (required; no config file is used):
 
 \*Either `ROCKETRIDE_AUTH` or `ROCKETRIDE_APIKEY` must be set.
 
+## Connecting a remote client (Claude, ChatGPT)
+
+These clients cannot be given an API key — they only speak OAuth. They bootstrap
+from the endpoint itself:
+
+1. `POST /mcp` with no credentials → `401` with
+   `WWW-Authenticate: Bearer resource_metadata="https://api.rocketride.ai/.well-known/oauth-protected-resource/mcp"`
+2. `GET` that URL → the RFC 9728 document, which names
+   `https://auth.rocketride.ai` as the authorization server.
+3. `GET https://auth.rocketride.ai/.well-known/oauth-authorization-server` → the
+   RFC 8414 document with the authorize/token endpoints and `S256` PKCE support.
+4. Authorization-code + PKCE flow against Zitadel, using a client id issued to
+   you. Dynamic client registration is deliberately not enabled, so the client
+   id is configured rather than negotiated.
+5. Call `/mcp` again with `Authorization: Bearer <access_token>`.
+
+Users without a RocketRide account can sign up from the Zitadel login screen and
+then continue through the same flow.
+
+Cursor and other header-capable clients can keep using a static
+`Authorization: Bearer rr_...` key instead — that path is unchanged.
+
 ## Links
 
 - [Documentation](https://docs.rocketride.org/)
 - [GitHub](https://github.com/rocketride-org/rocketride-server)
-- [Discord](https://discord.gg/9hr3tdZmEG)
+- [Discord](https://discord.gg/PMXrtenMsY)
 - [Contributing](https://github.com/rocketride-org/rocketride-server/blob/develop/CONTRIBUTING.md)
 
 ## License

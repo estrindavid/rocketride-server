@@ -8,7 +8,7 @@ Connects to an MCP server over one of three transports (STDIO (local subprocess)
 
 This node has no pipeline lanes: it is a control-plane tool node, connected to agents via the `tools` invoke channel.
 
-Tools are namespaced as `serverName.toolName` (e.g. `mcp.search_docs`), where `serverName` is set in configuration. Tools are discovered **once at pipeline startup** and cached; a server that adds tools later requires a pipeline restart to pick them up.
+Tools are namespaced as `serverName.toolName` (e.g. `mcp.search_docs`), where `serverName` is set in configuration. Tools are discovered at pipeline startup and cached, and the cache is re-read from the server whenever an agent discovers its tools or asks for a tool the cache does not know (at most once per second), so a server that adds or renames tools while the pipeline runs is picked up without a restart. A changed catalog is reported as a pipeline warning naming the added and removed tools. A tool that is still unknown after that refresh is refused with an explicit `ToolUnavailableError` and is never sent to the server, so an agent sees a clear failure rather than a plausible-looking answer.
 
 The implementation is pure Python standard library (`subprocess`, `urllib`, JSON-RPC 2.0), no MCP SDK dependency and no extra packages to install. Each request has a 20-second timeout.
 
@@ -91,6 +91,12 @@ The STDIO transport has no authentication fields: the subprocess runs locally wi
 - Protocol versions advertised during `initialize`: `2024-11-05` for STDIO, `2025-11-25` for Streamable HTTP and SSE.
 - Tool calls must use the fully namespaced `server.tool` form; a call addressed to a different `serverName` than this node's is rejected.
 - The MCP server process/connection is started in `beginGlobal` and shut down in `endGlobal`; a failed handshake or tool discovery fails pipeline startup with a warning.
+
+---
+
+## Zero-argument tools
+
+Some MCP tools take no arguments (their input schema is empty). Strict reasoning-model agents can silently drop such a tool from their catalog when it is advertised with an empty JSON Schema. To keep these tools usable everywhere, the client normalizes an empty input schema to carry a single optional placeholder argument (`rr_no_args`) before presenting the tool to an agent. RocketRide records which cached tools received that synthesized placeholder and strips it only for those tools before the call, so the MCP server never receives it. A tool that genuinely declares an argument named `rr_no_args` continues to receive that argument unchanged.
 
 ---
 
